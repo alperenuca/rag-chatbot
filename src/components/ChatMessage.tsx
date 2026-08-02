@@ -3,7 +3,8 @@
 import { useState } from 'react';
 import { Bot, Check, Copy, User } from 'lucide-react';
 import MarkdownContent from './MarkdownContent';
-import SourcesAccordion, { DocumentSource } from './SourcesAccordion';
+import ProductCarousel, { extractProductCards } from './ProductCarousel';
+import type { DocumentSource } from './SourcesAccordion';
 
 export interface ChatMessageData {
   role: 'user' | 'assistant';
@@ -11,6 +12,13 @@ export interface ChatMessageData {
   sources?: DocumentSource[];
   timestamp?: number;
 }
+
+// Backend, çoklu ürün yanıtlarında bu işareti metne yerleştirir (bkz.
+// /api/chat/route.ts kural 0); burada onu, `sources` verisinden türetilen
+// Yatay Kaydırılabilir Ürün Kartları (carousel) ile değiştiriyoruz. Bu
+// sayede uzun ürün listeleri dikeyde sohbeti şişiren bir Markdown tablosu
+// yerine, sabit yükseklikte yatayda kaydırılan kartlar olarak gösterilir.
+const PRODUCT_CARDS_PLACEHOLDER = '[[URUN_KARTLARI]]';
 
 function formatTime(timestamp?: number): string {
   if (!timestamp) return '';
@@ -34,46 +42,73 @@ export default function ChatMessage({ message }: { message: ChatMessageData }) {
     }
   };
 
+  const productCards = isUser ? [] : extractProductCards(message.sources);
+  const showCarousel = productCards.length > 0 && message.content.includes(PRODUCT_CARDS_PLACEHOLDER);
+  const [beforeText, afterText] = showCarousel
+    ? (() => {
+        const [first, ...rest] = message.content.split(PRODUCT_CARDS_PLACEHOLDER);
+        return [first.trim(), rest.join(PRODUCT_CARDS_PLACEHOLDER).trim()];
+      })()
+    : [message.content, ''];
+
   return (
     <div className={`group flex items-end gap-2 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
       <div
         className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center ${
           isUser
-            ? 'bg-indigo-600 text-white'
-            : 'bg-slate-200 dark:bg-slate-600 text-slate-600 dark:text-slate-200'
+            ? 'bg-gradient-to-br from-red-600 to-red-500 text-white'
+            : 'bg-neutral-100 text-neutral-500 border border-neutral-200'
         }`}
       >
         {isUser ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
       </div>
 
-      <div className={`flex flex-col max-w-[80%] ${isUser ? 'items-end' : 'items-start'}`}>
-        <div
-          className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-            isUser
-              ? 'whitespace-pre-wrap bg-indigo-600 text-white rounded-br-none'
-              : 'bg-slate-100 dark:bg-slate-700 text-slate-900 dark:text-slate-100 rounded-bl-none border border-slate-200 dark:border-slate-600'
-          }`}
-        >
-          {isUser ? message.content : <MarkdownContent content={message.content} />}
-        </div>
+      <div
+        className={`flex flex-col ${showCarousel ? 'max-w-[92%] sm:max-w-[90%]' : 'max-w-[80%]'} ${
+          isUser ? 'items-end' : 'items-start'
+        }`}
+      >
+        {isUser ? (
+          <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-gradient-to-br from-red-600 to-red-500 text-white rounded-br-md shadow-sm shadow-red-600/20">
+            {message.content}
+          </div>
+        ) : (
+          <div className="flex w-full flex-col gap-2">
+            {beforeText && (
+              <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-white text-neutral-800 rounded-bl-md border border-neutral-200 shadow-sm shadow-neutral-900/5">
+                <MarkdownContent content={beforeText} />
+              </div>
+            )}
+
+            {showCarousel && <ProductCarousel products={productCards} />}
+
+            {afterText && (
+              <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-white text-neutral-800 rounded-bl-md border border-neutral-200 shadow-sm shadow-neutral-900/5">
+                <MarkdownContent content={afterText} />
+              </div>
+            )}
+
+            {!showCarousel && !beforeText && (
+              <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-white text-neutral-800 rounded-bl-md border border-neutral-200 shadow-sm shadow-neutral-900/5">
+                <MarkdownContent content={message.content} />
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex items-center gap-2 mt-1 px-1 h-4">
           {message.timestamp && (
-            <span className="text-[10px] text-slate-400 dark:text-slate-500">
-              {formatTime(message.timestamp)}
-            </span>
+            <span className="text-[10px] text-neutral-400">{formatTime(message.timestamp)}</span>
           )}
           <button
             type="button"
             onClick={handleCopy}
             title="Mesajı kopyala"
-            className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+            className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity text-neutral-400 hover:text-red-600"
           >
             {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
           </button>
         </div>
-
-        {!isUser && <SourcesAccordion sources={message.sources} />}
       </div>
     </div>
   );

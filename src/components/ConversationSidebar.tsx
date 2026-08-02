@@ -1,6 +1,6 @@
 'use client';
 
-import { MessageSquare, MessageSquarePlus, Trash2, X } from 'lucide-react';
+import { Bot, MessageSquare, MessageSquarePlus, Trash2, X } from 'lucide-react';
 
 export interface ConversationSummary {
   id: string;
@@ -53,40 +53,49 @@ export default function ConversationSidebar({
   return (
     <>
       {isOpen && (
-        <div className="fixed inset-0 z-30 bg-black/40 md:hidden" onClick={onClose} />
+        <div className="fixed inset-0 z-30 bg-neutral-900/30 backdrop-blur-sm md:hidden" onClick={onClose} />
       )}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-shrink-0 flex-col border-r border-slate-200 bg-slate-50 transition-transform duration-200 dark:border-slate-800 dark:bg-slate-950 md:static md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-shrink-0 flex-col border-r border-neutral-200 bg-[#fdf8f7] transition-transform duration-200 md:static md:translate-x-0 ${
           isOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="flex items-center justify-between gap-2 p-3">
-          <button
-            type="button"
-            onClick={onNewChat}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-indigo-500"
-          >
-            <MessageSquarePlus className="h-4 w-4" />
-            Yeni Sohbet
-          </button>
+        <div className="flex items-center gap-2 px-4 pt-4 pb-2">
+          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-red-600 to-red-500 text-white">
+            <Bot className="h-4 w-4" />
+          </div>
+          <span className="text-sm font-semibold tracking-tight text-neutral-800">
+            Ores Asistanı
+          </span>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-2 text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200 md:hidden"
+            className="ml-auto rounded-lg p-1.5 text-neutral-400 hover:bg-neutral-200/70 hover:text-neutral-600 md:hidden"
             aria-label="Kenar çubuğunu kapat"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
+        <div className="p-3">
+          <button
+            type="button"
+            onClick={onNewChat}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-red-600 to-red-500 px-4 py-2.5 text-sm font-medium text-white shadow-sm shadow-red-600/20 transition-all hover:shadow-md hover:shadow-red-600/30"
+          >
+            <MessageSquarePlus className="h-4 w-4" />
+            Yeni Sohbet
+          </button>
+        </div>
+
         <div className="flex-1 space-y-1 overflow-y-auto px-2 pb-3">
           {loading && (
-            <p className="px-3 py-2 text-xs text-slate-400 dark:text-slate-500">Yükleniyor…</p>
+            <p className="px-3 py-2 text-xs text-neutral-400">Yükleniyor…</p>
           )}
 
           {!loading && conversations.length === 0 && (
-            <p className="px-3 py-8 text-center text-xs leading-relaxed text-slate-400 dark:text-slate-500">
+            <p className="px-3 py-8 text-center text-xs leading-relaxed text-neutral-400">
               Henüz sohbetiniz yok.
               <br />
               Yukarıdan yeni bir sohbet başlatın.
@@ -104,16 +113,18 @@ export default function ConversationSidebar({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') onSelect(conv.id);
                 }}
-                className={`group flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2.5 transition-colors ${
+                className={`group flex cursor-pointer items-center gap-2 rounded-xl px-3 py-2.5 transition-colors ${
                   isActive
-                    ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300'
-                    : 'text-slate-600 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-800/70'
+                    ? 'bg-red-50 text-red-700'
+                    : 'text-neutral-600 hover:bg-neutral-200/50'
                 }`}
               >
-                <MessageSquare className="h-4 w-4 flex-shrink-0 opacity-70" />
+                <MessageSquare
+                  className={`h-4 w-4 flex-shrink-0 ${isActive ? 'text-red-500' : 'opacity-60'}`}
+                />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium">{conv.title || 'Yeni Sohbet'}</p>
-                  <p className="truncate text-[11px] text-slate-400 dark:text-slate-500">
+                  <p className="truncate text-[11px] text-neutral-400">
                     {formatRelativeDate(conv.updated_at)}
                   </p>
                 </div>
@@ -121,7 +132,7 @@ export default function ConversationSidebar({
                   type="button"
                   onClick={(e) => handleDelete(e, conv.id)}
                   title="Sohbeti sil"
-                  className="flex-shrink-0 rounded-md p-1.5 text-slate-400 opacity-0 transition-opacity hover:bg-red-100 hover:text-red-600 focus:opacity-100 group-hover:opacity-100 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+                  className="flex-shrink-0 rounded-md p-1.5 text-neutral-400 opacity-0 transition-opacity hover:bg-red-100 hover:text-red-600 focus:opacity-100 group-hover:opacity-100"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>

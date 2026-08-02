@@ -238,8 +238,8 @@ export default function Home() {
   // giriş/kayıt ekranı gösterilir; chat arayüzü yalnızca girişli kullanıcıya açılır.
   if (authLoading) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-white dark:bg-slate-900">
-        <Loader2 className="h-6 w-6 animate-spin text-indigo-600" />
+      <main className="flex min-h-screen items-center justify-center bg-[#fefbfa]">
+        <Loader2 className="h-6 w-6 animate-spin text-red-600" />
       </main>
     );
   }
@@ -251,7 +251,7 @@ export default function Home() {
   const activeTitle = conversations.find((c) => c.id === conversationId)?.title;
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-white dark:bg-slate-900">
+    <div className="flex h-screen w-full overflow-hidden bg-[#fefbfa]">
       <ConversationSidebar
         conversations={conversations}
         activeConversationId={conversationId}
@@ -265,24 +265,24 @@ export default function Home() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Header */}
-        <header className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white/80 px-4 py-3 backdrop-blur-sm dark:border-slate-800 dark:bg-slate-900/80">
+        <header className="flex items-center justify-between gap-3 border-b border-neutral-200 bg-white/85 px-4 py-3 backdrop-blur-sm">
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setSidebarOpen(true)}
-              className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200 md:hidden"
+              className="rounded-lg p-2 text-neutral-500 hover:bg-neutral-100 hover:text-neutral-700 md:hidden"
               aria-label="Sohbet listesini aç"
             >
               <Menu className="h-5 w-5" />
             </button>
-            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white">
+            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-red-600 to-red-500 text-white shadow-sm shadow-red-600/25">
               <Bot className="h-5 w-5" />
             </div>
             <div className="min-w-0">
-              <h1 className="truncate text-sm font-semibold leading-tight text-slate-800 dark:text-slate-100">
+              <h1 className="truncate text-sm font-semibold leading-tight text-neutral-800">
                 {activeTitle || 'RAG Asistanı'}
               </h1>
-              <span className="text-[11px] font-mono text-slate-400 dark:text-slate-500">
+              <span className="text-[11px] font-mono text-neutral-400">
                 gpt-4o-mini + pgvector
               </span>
             </div>
@@ -294,7 +294,7 @@ export default function Home() {
         <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
           <div className="mx-auto max-w-3xl space-y-4">
             {historyLoading && (
-              <div className="flex justify-center py-6 text-xs text-slate-400 dark:text-slate-500">
+              <div className="flex justify-center py-6 text-xs text-neutral-400">
                 Sohbet yükleniyor…
               </div>
             )}
@@ -304,13 +304,13 @@ export default function Home() {
 
             {loading && (
               <div className="flex items-end gap-2">
-                <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-200">
+                <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-500 border border-neutral-200">
                   <Bot className="h-4 w-4" />
                 </div>
-                <div className="flex items-center gap-2 rounded-2xl rounded-bl-none bg-slate-100 px-4 py-3 text-sm text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:0.2s]" />
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:0.4s]" />
+                <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-500 shadow-sm shadow-neutral-900/5">
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-red-400" />
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-red-400 [animation-delay:0.2s]" />
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-red-400 [animation-delay:0.4s]" />
                 </div>
               </div>
             )}
@@ -319,7 +319,7 @@ export default function Home() {
         </div>
 
         {/* Input Formu */}
-        <div className="border-t border-slate-200 bg-white px-4 py-4 dark:border-slate-800 dark:bg-slate-900 md:px-8">
+        <div className="border-t border-neutral-200 bg-white px-4 py-4 md:px-8">
           <form onSubmit={handleSubmit} className="mx-auto flex max-w-3xl gap-2">
             <input
               type="text"
@@ -331,12 +331,12 @@ export default function Home() {
                   ? 'Sohbet yükleniyor...'
                   : 'Ürün veya politika hakkında bir şey sorun...'
               }
-              className="flex-1 rounded-xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:placeholder-slate-500"
+              className="flex-1 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm text-neutral-900 placeholder-neutral-400 transition-colors focus:border-red-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-red-100 disabled:opacity-60"
             />
             <button
               type="submit"
               disabled={loading || historyLoading || !input.trim()}
-              className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-medium text-white transition-colors duration-200 hover:bg-indigo-500 focus:outline-none disabled:opacity-50"
+              className="rounded-xl bg-gradient-to-r from-red-600 to-red-500 px-5 py-3 text-sm font-medium text-white shadow-sm shadow-red-600/25 transition-all hover:shadow-md hover:shadow-red-600/35 focus:outline-none disabled:opacity-50 disabled:shadow-none"
             >
               Gönder
             </button>

@@ -32,7 +32,7 @@ export default function UserMenu() {
         type="button"
         onClick={() => setOpen((prev) => !prev)}
         title={displayName}
-        className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-xs font-semibold text-white transition-all hover:ring-2 hover:ring-indigo-400"
+        className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-red-600 to-red-500 text-xs font-semibold text-white shadow-sm transition-all hover:ring-2 hover:ring-red-200"
       >
         {getInitials(displayName)}
       </button>
@@ -40,14 +40,12 @@ export default function UserMenu() {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-20 mt-2 w-52 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-800">
-            <div className="border-b border-slate-100 px-3 py-2 dark:border-slate-700">
+          <div className="absolute right-0 z-20 mt-2 w-52 overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-lg shadow-neutral-900/5">
+            <div className="border-b border-neutral-100 px-3 py-2.5">
               {fullName && (
-                <p className="truncate text-xs font-medium text-slate-800 dark:text-slate-200">
-                  {fullName}
-                </p>
+                <p className="truncate text-xs font-medium text-neutral-800">{fullName}</p>
               )}
-              <p className="truncate text-xs text-slate-500 dark:text-slate-400">{email}</p>
+              <p className="truncate text-xs text-neutral-500">{email}</p>
             </div>
             <button
               type="button"
@@ -55,7 +53,7 @@ export default function UserMenu() {
                 setOpen(false);
                 signOut();
               }}
-              className="flex w-full items-center gap-2 px-3 py-2 text-xs text-red-600 transition-colors hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20"
+              className="flex w-full items-center gap-2 px-3 py-2.5 text-xs text-red-600 transition-colors hover:bg-red-50"
             >
               <LogOut className="h-3.5 w-3.5" />
               Çıkış Yap

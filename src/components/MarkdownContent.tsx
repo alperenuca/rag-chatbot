@@ -15,15 +15,13 @@ const markdownComponents: Components = {
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="text-indigo-600 dark:text-indigo-400 underline underline-offset-2 hover:no-underline"
+      className="text-red-600 font-medium underline underline-offset-2 hover:text-red-700 hover:no-underline"
     >
       {children}
     </a>
   ),
   code: ({ children }) => (
-    <code className="bg-black/10 dark:bg-white/10 px-1 py-0.5 rounded text-[13px] font-mono">
-      {children}
-    </code>
+    <code className="bg-black/[0.06] px-1 py-0.5 rounded text-[13px] font-mono">{children}</code>
   ),
   blockquote: ({ children }) => (
     <blockquote className="border-l-2 border-current/30 pl-3 italic opacity-80 mb-2 last:mb-0">
@@ -32,14 +30,19 @@ const markdownComponents: Components = {
   ),
   hr: () => <hr className="my-2 border-current/20" />,
   table: ({ children }) => (
-    <div className="overflow-x-auto mb-2 last:mb-0">
+    <div className="overflow-x-auto mb-2 last:mb-0 rounded-lg border border-neutral-200">
       <table className="text-xs border-collapse w-full">{children}</table>
     </div>
   ),
+  thead: ({ children }) => <thead className="bg-red-50/70">{children}</thead>,
   th: ({ children }) => (
-    <th className="border border-current/20 px-2 py-1 text-left font-semibold">{children}</th>
+    <th className="px-3 py-2 text-left font-semibold text-red-800 border-b border-neutral-200">
+      {children}
+    </th>
   ),
-  td: ({ children }) => <td className="border border-current/20 px-2 py-1">{children}</td>,
+  td: ({ children }) => (
+    <td className="px-3 py-2 border-b border-neutral-100 last:border-b-0">{children}</td>
+  ),
 };
 
 export default function MarkdownContent({ content }: { content: string }) {

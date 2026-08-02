@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import { Bot, Lock, Loader2, Mail, User } from 'lucide-react';
+import { Bot, Lock, Loader2, Mail, Sparkles, User } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 
 type Mode = 'login' | 'signup';
@@ -66,26 +66,33 @@ export default function AuthScreen() {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-50 p-4 dark:bg-slate-900">
-      <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-slate-700 dark:bg-slate-800">
-        <div className="mb-6 flex flex-col items-center text-center">
-          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-indigo-600 text-white">
-            <Bot className="h-6 w-6" />
+    <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#fefbfa] p-4">
+      {/* Dekoratif arka plan aksanları */}
+      <div className="pointer-events-none absolute -top-32 -right-32 h-96 w-96 rounded-full bg-red-100 opacity-60 blur-3xl" />
+      <div className="pointer-events-none absolute -bottom-32 -left-32 h-96 w-96 rounded-full bg-red-50 opacity-80 blur-3xl" />
+
+      <div className="relative w-full max-w-sm rounded-3xl border border-neutral-200/80 bg-white/90 p-7 shadow-xl shadow-red-900/5 backdrop-blur-sm">
+        <div className="mb-7 flex flex-col items-center text-center">
+          <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-red-600 to-red-500 text-white shadow-lg shadow-red-600/30">
+            <Bot className="h-7 w-7" />
           </div>
-          <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">RAG Asistanı</h1>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Devam etmek için giriş yapın veya kayıt olun.
+          <h1 className="text-xl font-semibold tracking-tight text-neutral-900">
+            Ores RAG Asistanı
+          </h1>
+          <p className="mt-1.5 flex items-center gap-1 text-xs text-neutral-500">
+            <Sparkles className="h-3 w-3 text-red-500" />
+            Devam etmek için giriş yapın veya kayıt olun
           </p>
         </div>
 
-        <div className="mb-5 flex rounded-lg bg-slate-100 p-1 dark:bg-slate-900/60">
+        <div className="mb-6 flex rounded-xl bg-neutral-100 p-1">
           <button
             type="button"
             onClick={() => switchMode('login')}
-            className={`flex-1 rounded-md py-1.5 text-sm font-medium transition-colors ${
+            className={`flex-1 rounded-lg py-2 text-sm font-medium transition-all duration-200 ${
               mode === 'login'
-                ? 'bg-indigo-600 text-white'
-                : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
+                ? 'bg-white text-red-600 shadow-sm'
+                : 'text-neutral-500 hover:text-neutral-800'
             }`}
           >
             Giriş Yap
@@ -93,10 +100,10 @@ export default function AuthScreen() {
           <button
             type="button"
             onClick={() => switchMode('signup')}
-            className={`flex-1 rounded-md py-1.5 text-sm font-medium transition-colors ${
+            className={`flex-1 rounded-lg py-2 text-sm font-medium transition-all duration-200 ${
               mode === 'signup'
-                ? 'bg-indigo-600 text-white'
-                : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'
+                ? 'bg-white text-red-600 shadow-sm'
+                : 'text-neutral-500 hover:text-neutral-800'
             }`}
           >
             Kayıt Ol
@@ -106,7 +113,7 @@ export default function AuthScreen() {
         <form onSubmit={handleSubmit} className="space-y-3">
           {mode === 'signup' && (
             <div className="relative">
-              <User className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
+              <User className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
               <input
                 type="text"
                 required
@@ -114,12 +121,12 @@ export default function AuthScreen() {
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
                 placeholder="Ad Soyad"
-                className="w-full rounded-lg border border-slate-300 bg-slate-50 py-2.5 pl-9 pr-3 text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-white dark:placeholder-slate-500"
+                className="w-full rounded-xl border border-neutral-200 bg-neutral-50 py-2.5 pl-10 pr-3 text-sm text-neutral-900 placeholder-neutral-400 transition-colors focus:border-red-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-red-100"
               />
             </div>
           )}
           <div className="relative">
-            <Mail className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
+            <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
             <input
               type="email"
               required
@@ -127,11 +134,11 @@ export default function AuthScreen() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="E-posta"
-              className="w-full rounded-lg border border-slate-300 bg-slate-50 py-2.5 pl-9 pr-3 text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-white dark:placeholder-slate-500"
+              className="w-full rounded-xl border border-neutral-200 bg-neutral-50 py-2.5 pl-10 pr-3 text-sm text-neutral-900 placeholder-neutral-400 transition-colors focus:border-red-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-red-100"
             />
           </div>
           <div className="relative">
-            <Lock className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
+            <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400" />
             <input
               type="password"
               required
@@ -140,19 +147,23 @@ export default function AuthScreen() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Şifre (en az 6 karakter)"
-              className="w-full rounded-lg border border-slate-300 bg-slate-50 py-2.5 pl-9 pr-3 text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-white dark:placeholder-slate-500"
+              className="w-full rounded-xl border border-neutral-200 bg-neutral-50 py-2.5 pl-10 pr-3 text-sm text-neutral-900 placeholder-neutral-400 transition-colors focus:border-red-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-red-100"
             />
           </div>
 
-          {error && <p className="text-xs text-red-500 dark:text-red-400">{error}</p>}
+          {error && (
+            <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>
+          )}
           {infoMessage && (
-            <p className="text-xs text-emerald-600 dark:text-emerald-400">{infoMessage}</p>
+            <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-600">
+              {infoMessage}
+            </p>
           )}
 
           <button
             type="submit"
             disabled={loading}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:opacity-50"
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-red-600 to-red-500 py-2.5 text-sm font-medium text-white shadow-md shadow-red-600/25 transition-all hover:shadow-lg hover:shadow-red-600/35 disabled:opacity-50"
           >
             {loading && <Loader2 className="h-4 w-4 animate-spin" />}
             {mode === 'login' ? 'Giriş Yap' : 'Kayıt Ol'}

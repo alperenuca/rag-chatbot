@@ -64,40 +64,36 @@ function SourceCard({ source }: { source: DocumentSource }) {
     typeof source.similarity === 'number' ? Math.round(source.similarity * 100) : null;
 
   return (
-    <div className="rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800/80 overflow-hidden">
+    <div className="rounded-xl border border-neutral-200 bg-white overflow-hidden">
       <button
         type="button"
         onClick={() => setExpanded((prev) => !prev)}
         aria-expanded={expanded}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-700/60 transition-colors"
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left hover:bg-neutral-50 transition-colors"
       >
         <div className="flex items-center gap-2 min-w-0">
-          <span className="flex-shrink-0 text-indigo-600 dark:text-indigo-400">
+          <span className="flex-shrink-0 text-red-500">
             <SourceTypeIcon type={source.metadata?.type} />
           </span>
-          <span className="truncate text-xs font-medium text-slate-800 dark:text-slate-100">
-            {title}
-          </span>
+          <span className="truncate text-xs font-medium text-neutral-800">{title}</span>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          <span className="hidden sm:inline-block text-[10px] uppercase tracking-wide font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/40 px-2 py-0.5 rounded-full">
+          <span className="hidden sm:inline-block text-[10px] uppercase tracking-wide font-semibold text-red-700 bg-red-50 px-2 py-0.5 rounded-full">
             {typeLabel}
           </span>
           {similarityPct !== null && (
-            <span className="text-[10px] font-mono text-slate-400 dark:text-slate-500">
-              %{similarityPct}
-            </span>
+            <span className="text-[10px] font-mono text-neutral-400">%{similarityPct}</span>
           )}
           <ChevronDown
-            className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${
+            className={`w-3.5 h-3.5 text-neutral-400 transition-transform duration-200 ${
               expanded ? 'rotate-180' : ''
             }`}
           />
         </div>
       </button>
       {expanded && (
-        <div className="px-3 pb-3 pt-1 border-t border-slate-100 dark:border-slate-700">
-          <p className="text-xs text-slate-600 dark:text-slate-300 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
+        <div className="px-3 pb-3 pt-1 border-t border-neutral-100">
+          <p className="text-xs text-neutral-600 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
             {source.content}
           </p>
         </div>
@@ -117,7 +113,7 @@ export default function SourcesAccordion({ sources }: { sources?: DocumentSource
         type="button"
         onClick={() => setIsOpen((prev) => !prev)}
         aria-expanded={isOpen}
-        className="flex items-center gap-1.5 text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+        className="flex items-center gap-1.5 text-xs font-medium text-neutral-500 hover:text-red-600 transition-colors"
       >
         <ChevronDown
           className={`w-3.5 h-3.5 transition-transform duration-200 ${
@@ -125,9 +121,7 @@ export default function SourcesAccordion({ sources }: { sources?: DocumentSource
           }`}
         />
         Kaynaklar
-        <span className="text-[10px] font-normal text-slate-400 dark:text-slate-500">
-          ({sources.length})
-        </span>
+        <span className="text-[10px] font-normal text-neutral-400">({sources.length})</span>
       </button>
 
       {isOpen && (
