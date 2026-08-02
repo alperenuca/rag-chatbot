@@ -6,10 +6,18 @@ import { BookOpen, ChevronDown, FileText, Package } from 'lucide-react';
 export interface DocumentMetadata {
   source?: string;
   type?: string;
+  title?: string;
   name?: string;
+  sku?: string;
   category?: string;
-  price?: number;
+  dimension?: string;
+  material?: string;
+  profile_thickness_mm?: string;
+  color?: string;
+  weight_kg?: number | null;
+  price?: number | null;
   stock?: number;
+  url?: string;
 }
 
 export interface DocumentSource {
@@ -22,8 +30,8 @@ export interface DocumentSource {
 function getSourceTitle(source: DocumentSource): string {
   const { metadata, content } = source;
 
-  if (metadata?.type === 'product' && metadata.name) {
-    return metadata.name;
+  if (metadata?.type === 'product' && (metadata.title || metadata.name)) {
+    return metadata.title ?? metadata.name!;
   }
 
   if (metadata?.type === 'policy') {
@@ -56,40 +64,40 @@ function SourceCard({ source }: { source: DocumentSource }) {
     typeof source.similarity === 'number' ? Math.round(source.similarity * 100) : null;
 
   return (
-    <div className="rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800/80 overflow-hidden">
+    <div className="rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800/80 overflow-hidden">
       <button
         type="button"
         onClick={() => setExpanded((prev) => !prev)}
         aria-expanded={expanded}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-700/60 transition-colors"
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-700/60 transition-colors"
       >
         <div className="flex items-center gap-2 min-w-0">
-          <span className="flex-shrink-0 text-blue-600 dark:text-blue-400">
+          <span className="flex-shrink-0 text-indigo-600 dark:text-indigo-400">
             <SourceTypeIcon type={source.metadata?.type} />
           </span>
-          <span className="truncate text-xs font-medium text-gray-800 dark:text-gray-100">
+          <span className="truncate text-xs font-medium text-slate-800 dark:text-slate-100">
             {title}
           </span>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          <span className="hidden sm:inline-block text-[10px] uppercase tracking-wide font-semibold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/40 px-2 py-0.5 rounded-full">
+          <span className="hidden sm:inline-block text-[10px] uppercase tracking-wide font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/40 px-2 py-0.5 rounded-full">
             {typeLabel}
           </span>
           {similarityPct !== null && (
-            <span className="text-[10px] font-mono text-gray-400 dark:text-gray-500">
+            <span className="text-[10px] font-mono text-slate-400 dark:text-slate-500">
               %{similarityPct}
             </span>
           )}
           <ChevronDown
-            className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 ${
+            className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${
               expanded ? 'rotate-180' : ''
             }`}
           />
         </div>
       </button>
       {expanded && (
-        <div className="px-3 pb-3 pt-1 border-t border-gray-100 dark:border-gray-700">
-          <p className="text-xs text-gray-600 dark:text-gray-300 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
+        <div className="px-3 pb-3 pt-1 border-t border-slate-100 dark:border-slate-700">
+          <p className="text-xs text-slate-600 dark:text-slate-300 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
             {source.content}
           </p>
         </div>
@@ -104,12 +112,12 @@ export default function SourcesAccordion({ sources }: { sources?: DocumentSource
   if (!sources || sources.length === 0) return null;
 
   return (
-    <div className="mt-2 w-full max-w-[80%]">
+    <div className="mt-2 w-full">
       <button
         type="button"
         onClick={() => setIsOpen((prev) => !prev)}
         aria-expanded={isOpen}
-        className="flex items-center gap-1.5 text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+        className="flex items-center gap-1.5 text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
       >
         <ChevronDown
           className={`w-3.5 h-3.5 transition-transform duration-200 ${
@@ -117,7 +125,7 @@ export default function SourcesAccordion({ sources }: { sources?: DocumentSource
           }`}
         />
         Kaynaklar
-        <span className="text-[10px] font-normal text-gray-400 dark:text-gray-500">
+        <span className="text-[10px] font-normal text-slate-400 dark:text-slate-500">
           ({sources.length})
         </span>
       </button>

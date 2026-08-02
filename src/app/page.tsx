@@ -1,26 +1,38 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
-import SourcesAccordion, { DocumentSource } from '@/components/SourcesAccordion';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { Bot, Loader2, Menu } from 'lucide-react';
+import ChatMessage, { ChatMessageData } from '@/components/ChatMessage';
+import AuthScreen from '@/components/AuthScreen';
+import UserMenu from '@/components/UserMenu';
+import ConversationSidebar, { ConversationSummary } from '@/components/ConversationSidebar';
+import { useAuth } from '@/context/AuthContext';
 
-interface Message {
+const WELCOME_MESSAGE: ChatMessageData = {
+  role: 'assistant',
+  content: 'Merhaba! Ürünlerimiz ve politikalarımız hakkında size nasıl yardımcı olabilirim?',
+  timestamp: Date.now(),
+};
+
+interface StoredMessageRow {
   role: 'user' | 'assistant';
   content: string;
-  sources?: DocumentSource[];
+  sources?: ChatMessageData['sources'];
+  created_at: string;
 }
 
 export default function Home() {
+  const { user, loading: authLoading } = useAuth();
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: 'assistant',
-      content: 'Merhaba! Ürünlerimiz ve politikalarımız hakkında size nasıl yardımcı olabilirim?',
-    },
-  ]);
+  const [messages, setMessages] = useState<ChatMessageData[]>([WELCOME_MESSAGE]);
   const [loading, setLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [listLoading, setListLoading] = useState(false);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Otomatik aşağı kaydırma
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -29,20 +41,167 @@ export default function Home() {
     scrollToBottom();
   }, [messages, loading]);
 
+  const loadConversationMessages = useCallback(async (id: string) => {
+    setHistoryLoading(true);
+    try {
+      const response = await fetch(`/api/conversations/${id}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Sohbet yüklenemedi.');
+      }
+
+      const rows: StoredMessageRow[] = data.messages ?? [];
+      setMessages(
+        rows.length > 0
+          ? rows.map((row) => ({
+              role: row.role,
+              content: row.content,
+              sources: row.sources,
+              timestamp: new Date(row.created_at).getTime(),
+            }))
+          : [WELCOME_MESSAGE]
+      );
+    } catch (error) {
+      console.error('Sohbet yüklenirken hata:', error);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  const fetchConversations = useCallback(async () => {
+    try {
+      const response = await fetch('/api/conversations');
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Sohbet listesi yüklenemedi.');
+      }
+
+      const list: ConversationSummary[] = data.conversations ?? [];
+      setConversations(list);
+
+      if (list.length > 0) {
+        setConversationId(list[0].id);
+        await loadConversationMessages(list[0].id);
+      } else {
+        setConversationId(null);
+        setMessages([WELCOME_MESSAGE]);
+      }
+    } catch (error) {
+      console.error('Sohbet listesi yüklenirken hata:', error);
+    } finally {
+      setListLoading(false);
+    }
+  }, [loadConversationMessages]);
+
+  // Kullanıcı giriş yaptığında sohbet listesini yükle, çıkış yaptığında sıfırla.
+  // ÖNEMLİ: Supabase, sekme değiştirip geri gelindiğinde oturum belirtecini
+  // arka planda tazeler ve bu her seferinde YENİ bir `user` nesne referansı
+  // üretir. Bağımlılığı `user` nesnesi yerine sabit kalan `user?.id`'ye
+  // bağlayarak, aynı kullanıcı için geçmişin gereksiz yere ve konuşmayı
+  // sıfırlayarak yeniden çekilmesini engelliyoruz.
+  const userId = user?.id ?? null;
+
+  useEffect(() => {
+    if (authLoading) return;
+
+    if (userId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- kullanıcı değiştiğinde listeyi sunucudan çekmeden önce yükleniyor durumunu işaretliyoruz.
+      setListLoading(true);
+      fetchConversations();
+    } else {
+      setConversations([]);
+      setConversationId(null);
+      setMessages([WELCOME_MESSAGE]);
+    }
+  }, [userId, authLoading, fetchConversations]);
+
+  const upsertConversationSummary = (id: string, title: string | null) => {
+    setConversations((prev) => {
+      const now = new Date().toISOString();
+      const existing = prev.find((c) => c.id === id);
+      const updated: ConversationSummary = existing
+        ? { ...existing, title: title ?? existing.title, updated_at: now }
+        : { id, title, created_at: now, updated_at: now };
+      const rest = prev.filter((c) => c.id !== id);
+      return [updated, ...rest];
+    });
+  };
+
+  const handleNewChat = async () => {
+    setSidebarOpen(false);
+    try {
+      const response = await fetch('/api/conversations', { method: 'POST' });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Yeni sohbet oluşturulamadı.');
+      }
+
+      const newConversation = data.conversation as ConversationSummary;
+      setConversations((prev) => [newConversation, ...prev]);
+      setConversationId(newConversation.id);
+      setMessages([WELCOME_MESSAGE]);
+    } catch (error) {
+      console.error('Yeni sohbet oluşturulurken hata:', error);
+    }
+  };
+
+  const handleSelectConversation = (id: string) => {
+    setSidebarOpen(false);
+    if (id === conversationId) return;
+    setConversationId(id);
+    loadConversationMessages(id);
+  };
+
+  const handleDeleteConversation = async (id: string) => {
+    try {
+      const response = await fetch(`/api/conversations/${id}`, { method: 'DELETE' });
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || 'Sohbet silinemedi.');
+      }
+
+      setConversations((prev) => prev.filter((c) => c.id !== id));
+
+      if (id === conversationId) {
+        setConversationId(null);
+        setMessages([WELCOME_MESSAGE]);
+      }
+    } catch (error) {
+      console.error('Sohbet silinirken hata:', error);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || loading) return;
+    // historyLoading tamamlanmadan mesaj gönderilirse conversationId henüz
+    // set edilmemiş olabilir; bu, aynı kullanıcı için yanlışlıkla ikinci bir
+    // sohbet oturumu oluşmasına (ve görünen geçmişin "kaybolmasına") yol açar.
+    if (!input.trim() || loading || historyLoading) return;
 
     const userMessage = input.trim();
+    const historyForRequest = messages
+      .filter((msg) => !msg.content.startsWith('❌'))
+      .map((msg) => ({ role: msg.role, content: msg.content }));
+
     setInput('');
-    setMessages((prev) => [...prev, { role: 'user', content: userMessage }]);
+    setMessages((prev) => [
+      ...prev,
+      { role: 'user', content: userMessage, timestamp: Date.now() },
+    ]);
     setLoading(true);
 
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage }),
+        body: JSON.stringify({
+          message: userMessage,
+          history: historyForRequest,
+          conversationId,
+        }),
       });
 
       const data = await response.json();
@@ -51,9 +210,14 @@ export default function Home() {
         throw new Error(data.error || 'Bir hata oluştu');
       }
 
+      if (data.conversationId) {
+        setConversationId(data.conversationId);
+        upsertConversationSummary(data.conversationId, data.conversationTitle ?? null);
+      }
+
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: data.reply, sources: data.sources },
+        { role: 'assistant', content: data.reply, sources: data.sources, timestamp: Date.now() },
       ]);
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Yanıt alınamadı.';
@@ -62,86 +226,123 @@ export default function Home() {
         {
           role: 'assistant',
           content: `❌ Hata: ${errorMessage}`,
+          timestamp: Date.now(),
         },
       ]);
-    }finally {
+    } finally {
       setLoading(false);
     }
   };
 
+  // Giriş yapılmadan RAG asistanına erişilemez: önce yükleme, sonra
+  // giriş/kayıt ekranı gösterilir; chat arayüzü yalnızca girişli kullanıcıya açılır.
+  if (authLoading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-white dark:bg-slate-900">
+        <Loader2 className="h-6 w-6 animate-spin text-indigo-600" />
+      </main>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen />;
+  }
+
+  const activeTitle = conversations.find((c) => c.id === conversationId)?.title;
+
   return (
-    <main className="flex min-h-screen flex-col items-center justify-between p-4 md:p-12 bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-100">
-      <div className="w-full max-w-3xl bg-white dark:bg-gray-800 rounded-2xl shadow-xl flex flex-col h-[80vh] border border-gray-200 dark:border-gray-700">
-        
+    <div className="flex h-screen w-full overflow-hidden bg-white dark:bg-slate-900">
+      <ConversationSidebar
+        conversations={conversations}
+        activeConversationId={conversationId}
+        loading={listLoading}
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        onSelect={handleSelectConversation}
+        onNewChat={handleNewChat}
+        onDelete={handleDeleteConversation}
+      />
+
+      <div className="flex min-w-0 flex-1 flex-col">
         {/* Header */}
-        <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between bg-white dark:bg-gray-800 rounded-t-2xl">
-          <div className="flex items-center gap-3">
-            <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse" />
-            <h1 className="font-semibold text-lg">RAG Asistanı</h1>
+        <header className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white/80 px-4 py-3 backdrop-blur-sm dark:border-slate-800 dark:bg-slate-900/80">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+              className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200 md:hidden"
+              aria-label="Sohbet listesini aç"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white">
+              <Bot className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-semibold leading-tight text-slate-800 dark:text-slate-100">
+                {activeTitle || 'RAG Asistanı'}
+              </h1>
+              <span className="text-[11px] font-mono text-slate-400 dark:text-slate-500">
+                gpt-4o-mini + pgvector
+              </span>
+            </div>
           </div>
-          <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
-            gpt-4o-mini + pgvector
-          </span>
-        </div>
+          <UserMenu />
+        </header>
 
         {/* Mesaj Listesi */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.map((msg, index) => (
-            <div
-              key={index}
-              className={`flex flex-col ${
-                msg.role === 'user' ? 'items-end' : 'items-start'
-              }`}
-            >
-              <div
-                className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap ${
-                  msg.role === 'user'
-                    ? 'bg-blue-600 text-white rounded-br-none'
-                    : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded-bl-none border border-gray-200 dark:border-gray-600'
-                }`}
-              >
-                {msg.content}
+        <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
+          <div className="mx-auto max-w-3xl space-y-4">
+            {historyLoading && (
+              <div className="flex justify-center py-6 text-xs text-slate-400 dark:text-slate-500">
+                Sohbet yükleniyor…
               </div>
+            )}
 
-              {msg.role === 'assistant' && <SourcesAccordion sources={msg.sources} />}
-            </div>
-          ))}
+            {!historyLoading &&
+              messages.map((msg, index) => <ChatMessage key={index} message={msg} />)}
 
-          {loading && (
-            <div className="flex justify-start">
-              <div className="bg-gray-100 dark:bg-gray-700 rounded-2xl rounded-bl-none px-4 py-3 text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" />
-                <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce [animation-delay:0.2s]" />
-                <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce [animation-delay:0.4s]" />
+            {loading && (
+              <div className="flex items-end gap-2">
+                <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-200">
+                  <Bot className="h-4 w-4" />
+                </div>
+                <div className="flex items-center gap-2 rounded-2xl rounded-bl-none bg-slate-100 px-4 py-3 text-sm text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:0.2s]" />
+                  <div className="h-2 w-2 animate-bounce rounded-full bg-slate-400 [animation-delay:0.4s]" />
+                </div>
               </div>
-            </div>
-          )}
-          <div ref={messagesEndRef} />
+            )}
+            <div ref={messagesEndRef} />
+          </div>
         </div>
 
         {/* Input Formu */}
-        <form
-          onSubmit={handleSubmit}
-          className="p-4 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded-b-2xl"
-        >
-          <div className="flex gap-2">
+        <div className="border-t border-slate-200 bg-white px-4 py-4 dark:border-slate-800 dark:bg-slate-900 md:px-8">
+          <form onSubmit={handleSubmit} className="mx-auto flex max-w-3xl gap-2">
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ürün veya politika hakkında bir şey sorun..."
-              className="flex-1 px-4 py-3 text-sm rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-white"
+              disabled={historyLoading}
+              placeholder={
+                historyLoading
+                  ? 'Sohbet yükleniyor...'
+                  : 'Ürün veya politika hakkında bir şey sorun...'
+              }
+              className="flex-1 rounded-xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:placeholder-slate-500"
             />
             <button
               type="submit"
-              disabled={loading || !input.trim()}
-              className="px-5 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-xl transition-colors duration-200 focus:outline-none"
+              disabled={loading || historyLoading || !input.trim()}
+              className="rounded-xl bg-indigo-600 px-5 py-3 text-sm font-medium text-white transition-colors duration-200 hover:bg-indigo-500 focus:outline-none disabled:opacity-50"
             >
               Gönder
             </button>
-          </div>
-        </form>
+          </form>
+        </div>
       </div>
-    </main>
+    </div>
   );
 }
