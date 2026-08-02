@@ -165,6 +165,94 @@ function isLikelyDirectCategoryBrowse(message: string, knownCategories: string[]
  */
 const PRODUCT_CARDS_PLACEHOLDER = '[[URUN_KARTLARI]]';
 
+/**
+ * "bu ürünün ağırlığı", "indirimli fiyatı nedir", "evet sipariş ver" gibi
+ * mesajlar yeni bir arama değil; sohbette AZ ÖNCE konuşulan ürüne
+ * gönderme yapar. Bu durumda rastgele vektör eşleşmesine güvenmek yerine
+ * son konuşulan ürünü deterministik olarak bağlama kilitlememiz gerekir.
+ */
+function looksLikeProductFollowUp(message: string): boolean {
+  const normalized = message.toLowerCase().trim();
+  const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+  if (!normalized) return false;
+
+  // Katalog/liste aramaları takip sorusu değildir ("indirimli ürünler hangileri").
+  if (looksLikeRankingOrSingleItemQuestion(normalized)) return false;
+  const catalogListHints = [
+    'ürünler', 'hangileri', 'neler var', 'kampanya', 'kampanyalı',
+    'listesi', 'göster', 'kategori',
+  ];
+  if (catalogListHints.some((keyword) => normalized.includes(keyword))) return false;
+
+  const referential = [
+    'bu ürün', 'bu ürüne', 'bu ürünün', 'bu ürünü', 'bu üründen',
+    'bunun', 'bunu', 'buna', 'bundan',
+    'o ürün', 'o ürünün', 'onun', 'onu', 'şu ürün',
+  ];
+  if (referential.some((keyword) => normalized.includes(keyword))) return true;
+
+  // Tekil ürün özelliği soruları (kısa): "ağırlığı ne", "indirimli fiyatı nedir"
+  const propertyHints = [
+    'ağırlık', 'ağırlığı', 'fiyat', 'fiyatı', 'indirimli fiyat', 'stok', 'stokta',
+    'ölçü', 'ölçüsü', 'malzeme', 'malzemesi', 'renk', 'rengi', 'link',
+    'kaç kg', 'kaç kilo', 'ne kadar',
+  ];
+  if (wordCount <= 8 && propertyHints.some((keyword) => normalized.includes(keyword))) {
+    return true;
+  }
+
+  if (
+    wordCount <= 6 &&
+    /^(evet|tamam|olur|ok|okay|sipariş|alayım|almak istiyorum|satın al)/i.test(normalized)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Metinde geçen bilinen ürün adlarından EN UZUN eşleşeni döner (kısa adların
+ * uzun adların alt dizisi olmasına karşı).
+ */
+function findMentionedProductTitle(text: string, productTitles: string[]): string | null {
+  const cleaned = text.replaceAll(PRODUCT_CARDS_PLACEHOLDER, '').toLowerCase();
+  for (const title of productTitles) {
+    if (title && cleaned.includes(title.toLowerCase())) return title;
+  }
+  return null;
+}
+
+/**
+ * Sohbet geçmişinde (yeniden eskiye) en son adı geçen ürünün başlığını bulur.
+ * Önce asistan yanıtlarına, sonra kullanıcı mesajlarına bakılır.
+ */
+function resolveLastDiscussedProductTitle(
+  history: HistoryTurn[],
+  productTitles: string[]
+): string | null {
+  if (productTitles.length === 0) return null;
+
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i].role !== 'assistant') continue;
+    const found = findMentionedProductTitle(history[i].content, productTitles);
+    if (found) return found;
+  }
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i].role !== 'user') continue;
+    const found = findMentionedProductTitle(history[i].content, productTitles);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Sidebar'da "Yeni Sohbet" olarak görünen / henüz gerçek başlık almamış sohbetler. */
+function isPlaceholderConversationTitle(title: string | null | undefined): boolean {
+  if (!title) return true;
+  const normalized = title.trim().toLowerCase();
+  return normalized === '' || normalized === 'yeni sohbet';
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI Function Calling (Tool Use): search_products
 //
@@ -185,6 +273,7 @@ interface SearchProductsArgs {
   max_price?: number;
   min_price?: number;
   in_stock_only?: boolean;
+  on_discount_only?: boolean;
   query_text?: string;
   sort_by?: SortBy;
   limit?: number;
@@ -196,7 +285,7 @@ function buildSearchProductsTool(knownCategoriesText: string): ChatCompletionToo
     function: {
       name: 'search_products',
       description:
-        'ORES ürün kataloğunda kesin kriterlere göre ürün arar/filtreler/sıralar. Kullanıcı bir fiyat filtresi ("500 TL altı", "1000 TL üzeri"), bir SIRALAMA/ÜSTÜNLÜK sorusu ("en ucuz", "en pahalı", "en ağır", "en hafif", "en çok stokta olan"), stok durumu ("stokta olanlar") veya belirli bir kategori/ürün adı belirttiğinde MUTLAKA bu fonksiyonu çağır; bu tür filtrelemeleri/sıralamaları KENDİN (bağlamdaki metne bakarak) yapmaya ÇALIŞMA - context uzun olduğunda satır/ürün atlayabilir veya AĞIRLIK ile FİYATI birbirine karıştırabilirsin, bu fonksiyon veritabanından %100 doğru sonuç getirir. Kullanıcı TEK bir ürünü hedefliyorsa ("en ağır ürün HANGİSİ", "en pahalı ürün NEDİR" gibi) VE bir kategori belirtmediyse, category alanını BOŞ bırakarak fonksiyonu SADECE BİR KEZ çağır (TÜM kategorilerde arama yapılır) ve limit=1 vererek SADECE o 1 ürünün dönmesini sağla; bu durumda kategori kategori ayrı ayrı ÇAĞIRMA. Kullanıcı AÇIKÇA birden fazla kategori istediyse (örn. "iki kategori de") bu fonksiyonu her kategori için ayrı ayrı çağırabilirsin.',
+        'ORES ürün kataloğunda kesin kriterlere göre ürün arar/filtreler/sıralar. Kullanıcı bir fiyat filtresi ("500 TL altı", "1000 TL üzeri"), bir SIRALAMA/ÜSTÜNLÜK sorusu ("en ucuz", "en pahalı", "en ağır", "en hafif", "en çok stokta olan"), stok durumu ("stokta olanlar"), indirim durumu ("indirimli ürünler", "kampanyalılar") veya belirli bir kategori/ürün adı belirttiğinde MUTLAKA bu fonksiyonu çağır; bu tür filtrelemeleri/sıralamaları KENDİN (bağlamdaki metne bakarak) yapmaya ÇALIŞMA - context uzun olduğunda satır/ürün atlayabilir veya AĞIRLIK ile FİYATI birbirine karıştırabilirsin, bu fonksiyon veritabanından %100 doğru sonuç getirir. Kullanıcı TEK bir ürünü hedefliyorsa ("en ağır ürün HANGİSİ", "en pahalı ürün NEDİR" gibi) VE bir kategori belirtmediyse, category alanını BOŞ bırakarak fonksiyonu SADECE BİR KEZ çağır (TÜM kategorilerde arama yapılır) ve limit=1 vererek SADECE o 1 ürünün dönmesini sağla; bu durumda kategori kategori ayrı ayrı ÇAĞIRMA. Kullanıcı AÇIKÇA birden fazla kategori istediyse (örn. "iki kategori de") bu fonksiyonu her kategori için ayrı ayrı çağırabilirsin.',
       parameters: {
         type: 'object',
         properties: {
@@ -215,6 +304,11 @@ function buildSearchProductsTool(knownCategoriesText: string): ChatCompletionToo
           in_stock_only: {
             type: 'boolean',
             description: 'true ise sadece stokta olan (stok > 0) ürünler döner. Kullanıcı "stokta olanlar" gibi bir şey söylemediyse belirtme/false bırak.',
+          },
+          on_discount_only: {
+            type: 'boolean',
+            description:
+              'true ise sadece indirimde olan ürünler döner (has_discount=true). Kullanıcı "indirimli ürünler", "kampanyadakiler", "indirimde olanlar" dediğinde true ver.',
           },
           query_text: {
             type: 'string',
@@ -269,6 +363,9 @@ async function executeSearchProducts(
   }
   if (args.in_stock_only) {
     query = query.filter('metadata->stock', 'gt', 0);
+  }
+  if (args.on_discount_only) {
+    query = query.eq('metadata->>has_discount', 'true');
   }
   if (args.query_text && args.query_text.trim()) {
     // Virgül/parantez gibi PostgREST'in `or()` sözdizimini bozabilecek
@@ -467,6 +564,41 @@ export async function POST(req: NextRequest) {
 
     let documents: MatchedDocument[] = (matchedDocs ?? []) as MatchedDocument[];
 
+    // Takip sorusuysa ("bu ürünün ağırlığı", "indirimli fiyatı nedir" vb.)
+    // sohbette en son adı geçen ürünü bulup bağlama KİLİTLE. Böylece vektör
+    // araması yanlış bir ürüne sapsa bile model doğru ürünün ağırlık/fiyat/
+    // stok bilgisini görür.
+    let pinnedFollowUpProduct = false;
+    const isProductFollowUp = looksLikeProductFollowUp(message) && cleanHistory.length > 0;
+    if (isProductFollowUp) {
+      const { data: titleRows } = await supabase
+        .from('documents')
+        .select('metadata')
+        .eq('metadata->>type', 'product');
+      const productTitles = (titleRows ?? [])
+        .map((row) => (row.metadata as { title?: string } | null)?.title?.trim())
+        .filter((title): title is string => Boolean(title))
+        .sort((a, b) => b.length - a.length);
+
+      const lastProductTitle = resolveLastDiscussedProductTitle(cleanHistory, productTitles);
+      if (lastProductTitle) {
+        const { data: pinnedRows, error: pinError } = await supabase
+          .from('documents')
+          .select('content, metadata')
+          .eq('metadata->>type', 'product')
+          .eq('metadata->>title', lastProductTitle)
+          .limit(1);
+
+        if (pinError) {
+          console.error('Takip ürünü kilitlenirken hata:', pinError);
+        } else if (pinnedRows && pinnedRows.length > 0) {
+          const nonProductDocs = documents.filter((doc) => doc.metadata?.type !== 'product');
+          documents = [...(pinnedRows as MatchedDocument[]), ...nonProductDocs];
+          pinnedFollowUpProduct = true;
+        }
+      }
+    }
+
     const buildDerivedPromptFields = (docs: MatchedDocument[], toolActive: boolean) => {
       const productDocuments = docs.filter((doc) => doc.metadata?.type === 'product');
       const distinctResultCategories = new Set(
@@ -477,9 +609,11 @@ export async function POST(req: NextRequest) {
       // search_products aracı çağrıldıysa istek zaten kesin bir kritere göre
       // yapılmış demektir; bu durumda "genel/belirsiz soru" fallback'ini
       // tetiklemiyoruz (aksi halde tool sonucu az ürün döndürdüğünde model
-      // yanlışlıkla kategori listesi önerisine döner).
+      // yanlışlıkla kategori listesi önerisine döner). Aynı şekilde takip
+      // sorusunda ürünü kilitlemişsek de "hangi kategori?"e düşmemeliyiz.
       const isAmbiguousGenericQuery =
         !toolActive &&
+        !pinnedFollowUpProduct &&
         !looksLikePolicyQuestion(message) &&
         (productDocuments.length === 0 || distinctResultCategories.size > 1);
 
@@ -496,8 +630,28 @@ export async function POST(req: NextRequest) {
       const contextText = hasRelevantContext
         ? docs
             .map((doc) => {
+              // Metadata alanlarını (ağırlık, liste/indirimli fiyat, URL) modelin
+              // okuduğu bağlama açıkça ekle. content'te olsa bile burada tekrar
+              // etmek zarar vermez; content eski formatta kaldıysa kritik koruma
+              // sağlar.
               const url = doc.metadata?.url;
-              return url ? `${doc.content}\nÜrün Satın Alma Linki: ${url}` : doc.content;
+              const weightKg = doc.metadata?.weight_kg;
+              const listPrice = doc.metadata?.list_price;
+              const salePrice = doc.metadata?.price;
+              const hasDiscount = doc.metadata?.has_discount === true;
+              const extraLines = [
+                typeof weightKg === 'number' ? `Ağırlık: ${weightKg} kg` : null,
+                typeof listPrice === 'number' ? `Liste Fiyatı: ${listPrice} TL` : null,
+                typeof salePrice === 'number'
+                  ? hasDiscount
+                    ? `İndirimli / Satış Fiyatı: ${salePrice} TL (İndirimde)`
+                    : `Satış Fiyatı: ${salePrice} TL (İndirim yok)`
+                  : null,
+                url ? `Ürün Satın Alma Linki: ${url}` : null,
+              ]
+                .filter((line): line is string => Boolean(line))
+                .join('\n');
+              return extraLines ? `${doc.content}\n${extraLines}` : doc.content;
             })
             .join('\n\n---\n\n')
         : toolActive
@@ -637,6 +791,8 @@ export async function POST(req: NextRequest) {
                 category: doc.metadata?.category,
                 dimension: doc.metadata?.dimension,
                 price: doc.metadata?.price,
+                list_price: doc.metadata?.list_price,
+                has_discount: doc.metadata?.has_discount === true,
                 weight_kg: doc.metadata?.weight_kg,
                 stock: doc.metadata?.stock,
                 url: doc.metadata?.url,
@@ -718,6 +874,12 @@ export async function POST(req: NextRequest) {
     );
     const activeConversationId = conversationResult?.id ?? null;
 
+    // Kart paneli gösterilmiyorsa sources'a baseline vektör çöpü yazma;
+    // kart gösteriliyorsa yalnızca o yanıta ait ürün dokümanlarını sakla.
+    const sourcesToPersist = hasProductCards
+      ? documents.filter((doc) => doc.metadata?.type === 'product')
+      : null;
+
     if (activeConversationId) {
       const { error: insertError } = await supabase.from('messages').insert([
         {
@@ -731,7 +893,7 @@ export async function POST(req: NextRequest) {
           user_id: user.id,
           role: 'assistant',
           content: reply,
-          sources: documents,
+          sources: sourcesToPersist,
         },
       ]);
 
@@ -747,7 +909,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       reply,
-      sources: documents,
+      sources: sourcesToPersist ?? [],
       conversationId: activeConversationId,
       conversationTitle: conversationResult?.title ?? null,
     });
@@ -775,8 +937,8 @@ function buildTitle(message: string): string {
 /**
  * Verilen conversationId kullanıcıya aitse onu döner; geçersizse veya
  * belirtilmemişse kullanıcı için yeni bir sohbet oturumu oluşturur. Başlığı
- * henüz atanmamış (null) sohbetlere -"Yeni Sohbet" butonuyla oluşturulmuş
- * boş sohbetler dahil- ilk mesajdan otomatik başlık atar.
+ * henüz atanmamış (null) veya placeholder ("Yeni Sohbet") olan sohbetlere
+ * ilk gerçek kullanıcı mesajından otomatik başlık atar.
  */
 async function ensureConversation(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -793,7 +955,7 @@ async function ensureConversation(
       .maybeSingle();
 
     if (data?.id) {
-      if (!data.title) {
+      if (isPlaceholderConversationTitle(data.title as string | null)) {
         const title = buildTitle(firstMessage);
         await supabase.from('conversations').update({ title }).eq('id', data.id);
         return { id: data.id as string, title };

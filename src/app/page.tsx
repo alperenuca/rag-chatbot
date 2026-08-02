@@ -163,11 +163,17 @@ export default function Home() {
         throw new Error(data.error || 'Sohbet silinemedi.');
       }
 
-      setConversations((prev) => prev.filter((c) => c.id !== id));
+      const remaining = conversations.filter((c) => c.id !== id);
+      setConversations(remaining);
 
       if (id === conversationId) {
-        setConversationId(null);
-        setMessages([WELCOME_MESSAGE]);
+        if (remaining.length > 0) {
+          setConversationId(remaining[0].id);
+          await loadConversationMessages(remaining[0].id);
+        } else {
+          setConversationId(null);
+          setMessages([WELCOME_MESSAGE]);
+        }
       }
     } catch (error) {
       console.error('Sohbet silinirken hata:', error);
@@ -182,8 +188,11 @@ export default function Home() {
     if (!input.trim() || loading || historyLoading) return;
 
     const userMessage = input.trim();
+    // Karşılama mesajını OpenAI geçmişine gönderme; aksi halde model onu
+    // gerçek bir asistan turu sanıp bağlamı bozabiliyor.
     const historyForRequest = messages
       .filter((msg) => !msg.content.startsWith('❌'))
+      .filter((msg) => msg.content !== WELCOME_MESSAGE.content)
       .map((msg) => ({ role: msg.role, content: msg.content }));
 
     setInput('');

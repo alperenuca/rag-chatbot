@@ -91,16 +91,31 @@ async function processProducts() {
 
         for (const row of products) {
           const dimension = row.boyut || row.olcu;
-          // 28 üründen 24'ünde indirimli_fiyat_tl boş; bu durumda liste
-          // fiyatına (fiyat_tl) düşülür, aksi halde fiyat null/boş kalır.
-          const effectivePrice =
-            parseFloat(row.indirimli_fiyat_tl) || parseFloat(row.fiyat_tl) || null;
+          // liste fiyatı (fiyat_tl) ve indirimli fiyat (indirimli_fiyat_tl)
+          // AYRI AYRI saklanır (28 üründen sadece 4'ünde indirimli_fiyat_tl
+          // dolu). Önceden bu ikisi tek bir `price` alanında birleştirilip
+          // liste fiyatı tamamen atılıyordu; bu yüzden model bir üründe
+          // indirim olup olmadığını ASLA bilemiyordu ("indirimli fiyatı
+          // nedir" sorusuna yanlışlıkla "indirim yok" diyordu). `price`
+          // (satılan/geçerli fiyat) hâlâ filtreleme için kullanılıyor, ama
+          // artık `list_price` ve `has_discount` metadata'da da tutuluyor ve
+          // `content` metninde ikisi de görünüyor.
+          const listPrice = parseFloat(row.fiyat_tl) || null;
+          const discountedPrice = parseFloat(row.indirimli_fiyat_tl) || null;
+          const effectivePrice = discountedPrice ?? listPrice;
+          const hasDiscount = Boolean(
+            discountedPrice && listPrice && discountedPrice < listPrice
+          );
           const weight = parseFloat(row.agirlik_kg) || null;
           const stock = parseInt(row.stok_adedi, 10) || 0;
 
-          const content = `Ürün Adı: ${row.urun_adi} | Kategori: ${row.kategori} | Malzeme: ${row.malzeme} | Renk: ${row.renk} | Boyut/Ölçü: ${dimension} | Fiyat: ${
-            effectivePrice ?? 'Belirtilmemiş'
-          } TL | Stok: ${row.stok_adedi} | Açıklama: ${row.aciklama}`;
+          const priceLine = hasDiscount
+            ? `Liste Fiyatı: ${listPrice} TL | İndirimli Fiyat: ${discountedPrice} TL (İndirimde)`
+            : `Fiyat: ${effectivePrice ?? 'Belirtilmemiş'} TL (İndirim yok)`;
+
+          const content = `Ürün Adı: ${row.urun_adi} | Kategori: ${row.kategori} | Malzeme: ${row.malzeme} | Renk: ${row.renk} | Boyut/Ölçü: ${dimension} | Ağırlık: ${
+            weight ?? 'Belirtilmemiş'
+          } kg | ${priceLine} | Stok: ${row.stok_adedi} | Açıklama: ${row.aciklama}`;
 
           const embedding = await getEmbedding(content);
 
@@ -118,6 +133,8 @@ async function processProducts() {
               color: row.renk,
               weight_kg: weight,
               price: effectivePrice,
+              list_price: listPrice,
+              has_discount: hasDiscount,
               stock: stock,
               url: row.urun_url,
             },
