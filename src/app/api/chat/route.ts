@@ -180,17 +180,26 @@ function looksLikeProductFollowUp(message: string): boolean {
   if (!normalized) return false;
 
   // Katalog/liste aramaları takip sorusu değildir ("indirimli ürünler hangileri").
+  // Dikkat: "gösterdiğin ürün" gibi takip ifadelerinde "göster" alt dizisi
+  // geçer; bu yüzden kelime sınırı / tam ifade kullanıyoruz.
   if (looksLikeRankingOrSingleItemQuestion(normalized)) return false;
-  const catalogListHints = [
-    'ürünler', 'hangileri', 'neler var', 'kampanya', 'kampanyalı',
-    'listesi', 'göster', 'kategori',
+  const catalogListPatterns = [
+    /\bürünler\b/,
+    /\bhangileri\b/,
+    /neler var/,
+    /\bkampanyal[ıi]/,
+    /\blistesi\b/,
+    /\bgöster\b/,
+    /\bkategori\b/,
   ];
-  if (catalogListHints.some((keyword) => normalized.includes(keyword))) return false;
+  if (catalogListPatterns.some((pattern) => pattern.test(normalized))) return false;
 
   const referential = [
     'bu ürün', 'bu ürüne', 'bu ürünün', 'bu ürünü', 'bu üründen',
+    'bu gösterdiğin', 'gösterdiğin ürün', 'gösterdiğin',
     'bunun', 'bunu', 'buna', 'bundan',
     'o ürün', 'o ürünün', 'onun', 'onu', 'şu ürün',
+    'hakkında bilgi', 'detaylı bilgi', 'bilgi almak', 'detayını', 'detaylarını',
   ];
   if (referential.some((keyword) => normalized.includes(keyword))) return true;
 
@@ -201,6 +210,18 @@ function looksLikeProductFollowUp(message: string): boolean {
     'kaç kg', 'kaç kilo', 'ne kadar',
   ];
   if (wordCount <= 8 && propertyHints.some((keyword) => normalized.includes(keyword))) {
+    return true;
+  }
+
+  // "Evet, bu ürün hakkında bilgi..." gibi uzun onay + detay talepleri
+  if (
+    /^(evet|tamam|olur|ok|okay)/i.test(normalized) &&
+    (normalized.includes('bilgi') ||
+      normalized.includes('detay') ||
+      normalized.includes('ürün') ||
+      normalized.includes('sipariş') ||
+      normalized.includes('satın'))
+  ) {
     return true;
   }
 
@@ -421,6 +442,7 @@ interface BuildSystemPromptParams {
   hasProductCards: boolean;
   isAmbiguousGenericQuery: boolean;
   toolActive: boolean;
+  pinnedFollowUpProduct?: boolean;
 }
 
 function buildSystemPrompt({
@@ -429,6 +451,7 @@ function buildSystemPrompt({
   hasProductCards,
   isAmbiguousGenericQuery,
   toolActive,
+  pinnedFollowUpProduct = false,
 }: BuildSystemPromptParams): string {
   return `Sen Ores.com.tr e-ticaret platformunun profesyonel, kibar ve çözüm odaklı AI Müşteri Danışmanısın.
 
@@ -464,7 +487,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - "Bu modellerden hangisini daha yakından inceleyelim veya satın alma linkini paylaşayım?"
    Kart/ürün listesi YOKSA (politika, iletişim, genel yönlendirme vb.) kibar genel bir kapanış kullanabilirsin.
 2. STOKTA OLMAYANLARI GİZLEME: search_products sonucunda/bağlamda bir ürün varsa (stok 0 dahi olsa) bu ürün otomatik olarak kartlarda (stok durumu açıkça "Stokta yok" olarak) gösterilir; sen bunu görmezden gelip "bu kategoride ürün yok" DEME. "Ürün yok" cevabı SADECE o kategoriyle ilgili hiçbir ürün dokümanı/kartı yoksa verilir.
-3. HAFIZAYI KORU: Kullanıcı "evet", "tamam", "sipariş ver" gibi onay/devam niteliğinde kısa yanıtlar verdiğinde, sohbet geçmişindeki en son konuşulan ürünü ve detaylarını hatırla. Başlangıç mesajına dönme; kaldığın yerden o ürünle ilgili sipariş veya detaylandırma sürecine devam et.
+3. HAFIZAYI KORU VE ÜRÜN DETAYI (ÇOK ÖNEMLİ): Kullanıcı "evet", "tamam", "sipariş ver", "bu ürün hakkında bilgi", "gösterdiğin ürünün detayı" gibi onay/takip yanıtları verdiğinde, sohbet geçmişindeki en son konuşulan ürünü hatırla ve BAĞLAM BİLGİLERİ'ndeki o ürünün TAM içeriğini (açıklama, malzeme, ölçü, ağırlık, fiyat, stok, kullanım alanı vb.) kullanarak kibar, akıcı bir metinle cevap ver. ASLA "yalnızca ürün listesine erişebiliyorum", "detay veremiyorum", "sadece liste gösterebiliyorum" deme — bağlamda ürün bilgisi varsa DETAY VER. Sadece siteye link atıp geçiştirme; önce bağlamdaki bilgileri özetle, sonra isterse satın alma linkini ekle. Kapanışta yine proaktif sor (stok/sipariş/benzer model).
 4. ASLA ÜRÜN İCAT ETME (EN ÖNEMLİ KURAL): Yalnızca aşağıdaki "BAĞLAM BİLGİLERİ" bölümünde (veya search_products sonucunda) ADI GEÇEN ürünleri, fiyatları, modelleri ve özellikleri kullan. Kendi genel bilgine veya tahminine dayanarak ASLA yeni bir ürün adı, model, fiyat veya kategori üretme/uydurma. Bağlamda/arama sonucunda kullanıcının istediği kritere uyan HİÇBİR ürün yoksa, bunu asla gizleme; kullanıcıya nazikçe bu kritere uyan bir ürün bulunmadığını söyle.
 5. SADECE GERÇEK KATEGORİLERİ ÖNER: Aşağıdaki "KATALOĞUMUZDAKI GERÇEK KATEGORİLER" listesi, mağazamızda satılan TÜM kategorilerin kesin listesidir. Bir ürün/kategori bulunamadığında kullanıcıya alternatif önerirken SADECE bu listede yer alan kategori adlarını kullan. Bu listede olmayan bir kategori adını ("dekoratif ürünler", "mobilya", "ev eşyaları" gibi) ASLA var mış gibi öneri olarak söyleme; böyle bir şey söylersen ve kullanıcı onu sorarsa kendi kendinle çelişirsin. Listede tek bir kategori varsa, direkt o kategoriyi öner.
 6. SİPARİŞ YÖNLENDİRME KURALI: Kullanıcı "sipariş etmek istiyorum", "satın al", "ekle" veya benzeri bir satın alma talebinde bulunduğunda ASLA kullanıcının KENDİ adres, telefon veya ödeme bilgisini İSTEME. "ÜRÜN KARTLARI HAZIR" varsa kart üzerindeki [İncele] butonu zaten satın alma sayfasına yönlendirir, ayrıca metin içinde link vermene gerek yok. Kartlar yoksa (örn. daha önce bahsedilen tek bir ürün için devam ediyorsan), bağlamdaki ilgili ürünün "Ürün Satın Alma Linki" değerini kullanarak kullanıcıyı doğrudan o ürünün satın alma sayfasına yönlendir.
@@ -498,6 +521,7 @@ ${
 KATALOĞUMUZDAKI GERÇEK KATEGORİLER:
 ${knownCategoriesText}
 ${hasProductCards ? `\nÜRÜN KARTLARI HAZIR: Bu sorguya uyan ürünler bulundu; arayüzde otomatik olarak yatay kart (carousel) halinde gösterilecek. Kural 0'a KESİNLİKLE uy: metinde ürün detayı / bullet listesi / tablo YAZMA; sadece kısa kibar özet + [[URUN_KARTLARI]] + proaktif satış odaklı kapanış sorusu. "Başka bir konuda yardımcı olmamı ister misiniz?" deme — yerine listedeki modele / boyuta / detaya yönlendiren interaktif bir soru sor. Kullanıcı belirli bir adet istediyse ve sonuç daha azsa Kural 10'a göre gerçek sayıyı açıkça yaz.\n` : ''}
+${pinnedFollowUpProduct ? `\nTAKİP ÜRÜNÜ KİLİTLENDİ: Kullanıcı az önce gösterilen/konuşulan ürün hakkında bilgi istiyor. Aşağıdaki BAĞLAM BİLGİLERİ bu ürünün TAM kaydıdır. Kural 3'e uyarak özelliklerini, kullanımını, fiyat/stok bilgisini net ve yardımcı bir dille anlat. "Sadece listeye erişebiliyorum" deme. Kart yer tutucusu ([[URUN_KARTLARI]]) kullanma; bu bir detay cevabıdır.\n` : ''}
 BAĞLAM BİLGİLERİ:
 ${contextText}`;
 }
@@ -606,7 +630,40 @@ export async function POST(req: NextRequest) {
         .filter((title): title is string => Boolean(title))
         .sort((a, b) => b.length - a.length);
 
-      const lastProductTitle = resolveLastDiscussedProductTitle(cleanHistory, productTitles);
+      // 1) Metin geçmişinde ürün adı geçiyorsa onu kullan.
+      // 2) Kartlı yanıtlarda ürün adı metinde OLMAYABİLİR (Kural 0); bu durumda
+      //    sohbetteki son asistan mesajının sources alanından ürünü çıkar.
+      let lastProductTitle = resolveLastDiscussedProductTitle(cleanHistory, productTitles);
+
+      if (!lastProductTitle && typeof conversationId === 'string') {
+        const { data: lastAssistantRow } = await supabase
+          .from('messages')
+          .select('sources')
+          .eq('conversation_id', conversationId)
+          .eq('role', 'assistant')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const sourceDocs = Array.isArray(lastAssistantRow?.sources)
+          ? (lastAssistantRow.sources as MatchedDocument[])
+          : [];
+        const sourceTitles = sourceDocs
+          .map((doc) => doc.metadata?.title?.trim())
+          .filter((title): title is string => Boolean(title));
+        if (sourceTitles.length === 1) {
+          lastProductTitle = sourceTitles[0];
+        } else if (sourceTitles.length > 1) {
+          // Birden fazla kart gösterildiyse en son kullanıcı mesajındaki
+          // ipuçlarıyla eşleşeni seç; yoksa listedeki ilkini alma, metin
+          // geçmişine yeniden bak (zaten denendi) — tekil takip için en
+          // güvenlisi tek kartlı yanıtlardır.
+          lastProductTitle =
+            resolveLastDiscussedProductTitle(cleanHistory, sourceTitles.sort((a, b) => b.length - a.length)) ??
+            sourceTitles[0];
+        }
+      }
+
       if (lastProductTitle) {
         const { data: pinnedRows, error: pinError } = await supabase
           .from('documents')
@@ -699,6 +756,34 @@ export async function POST(req: NextRequest) {
     let rawReply: string;
     let hasProductCards = false;
 
+    // Takip detay sorusu: son konuşulan ürün kilidi aktifse tool çağırmadan
+    // doğrudan o ürünün tam içeriğiyle cevap ver (kart listesi değil, metin detay).
+    if (pinnedFollowUpProduct) {
+      const followUpDerived = buildDerivedPromptFields(documents, false);
+      hasProductCards = false;
+
+      const followUpCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: buildSystemPrompt({
+              knownCategoriesText,
+              contextText: followUpDerived.contextText,
+              hasProductCards: false,
+              isAmbiguousGenericQuery: false,
+              toolActive: false,
+              pinnedFollowUpProduct: true,
+            }),
+          },
+          ...historyMessages,
+          { role: 'user', content: message },
+        ],
+        temperature: 0.2,
+      });
+
+      rawReply = followUpCompletion.choices[0].message.content ?? '';
+    } else {
     // Kullanıcı mesajı KISA ve doğrudan bilinen bir kategori adını içeriyorsa
     // (örn. botun "Afiş Çerçevesi mi, Kaldırım Panosu mu?" sorusuna sadece
     // "afiş çerçevesi" cevabı verildiğinde), modelin search_products aracını
@@ -876,6 +961,7 @@ export async function POST(req: NextRequest) {
         hasProductCards = false;
       }
     }
+    } // pinnedFollowUpProduct else sonu
 
     // Model, ürünleri kendisi yazmak yerine [[URUN_KARTLARI]] yer tutucusunu
     // kullanmalı (bkz. kural 0). Bu yer tutucuyu tabloyla değiştirmiyoruz;
