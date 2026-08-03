@@ -92,24 +92,91 @@ function looksLikePolicyQuestion(text: string): boolean {
 }
 
 /**
+ * Basit Türkçe çekim sadeleştirme: "panoları" / "panosu" → "pano",
+ * "çerçeveleri" → "çerçeve". Böylece kategori adı tekil olsa bile çoğul
+ * kullanıcı ifadeleri eşleşir.
+ */
+function turkishStem(word: string): string {
+  let w = word.toLocaleLowerCase('tr-TR').replace(/[^\p{L}\p{N}]/gu, '');
+  if (!w) return w;
+
+  const suffixes = [
+    'larından',
+    'lerinden',
+    'lardan',
+    'lerden',
+    'ları',
+    'leri',
+    'lar',
+    'ler',
+    'asının',
+    'esinin',
+    'unun',
+    'ünün',
+    'ının',
+    'inin',
+    'ası',
+    'esi',
+    'usu',
+    'üsü',
+    'ısı',
+    'isi',
+    'su',
+    'sı',
+    'si',
+    'sü',
+    'ın',
+    'in',
+    'un',
+    'ün',
+  ];
+
+  for (const suffix of suffixes) {
+    if (w.length - suffix.length >= 3 && w.endsWith(suffix)) {
+      w = w.slice(0, -suffix.length);
+      break;
+    }
+  }
+
+  return w;
+}
+
+/**
  * Kullanıcının (veya search_products aracına verdiği) bir metin bilinen
  * kategori adlarından hangisine karşılık geliyorsa BULUNAN TÜM kategorileri
  * döner (örn. "afiş çerçevesi" -> ["Afiş Çerçevesi"]). Türkçe çekim ekleri
- * ("çerçeveleri", "panosunu" vb.) tam ifade eşleşmesini kaçırabileceğinden,
- * kelime köküne (ilk ~5 karakter) göre de eşleştirme yapılır.
+ * ("çerçeveleri", "panoları", "panosunu" vb.) için kök eşleşmesi yapılır.
  */
 function findMentionedCategories(message: string, knownCategories: string[]): string[] {
-  const normalizeWord = (word: string) => word.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const normalizeWord = (word: string) =>
+    word.toLocaleLowerCase('tr-TR').replace(/[^\p{L}\p{N}]/gu, '');
   const messageWords = message.split(/\s+/).map(normalizeWord).filter(Boolean);
+  const messageStems = messageWords.map(turkishStem);
 
-  const stemMatches = (word: string, target: string) => {
-    const stemLength = Math.min(5, word.length);
-    return word.slice(0, stemLength) === target.slice(0, stemLength);
+  const stemMatches = (catWord: string, msgWord: string) => {
+    const catStem = turkishStem(catWord);
+    const msgStem = turkishStem(msgWord);
+    if (!catStem || !msgStem) return false;
+    if (catStem === msgStem) return true;
+    // Kısa kökler için önek: "pano" ⊂ "panosu" (stem sonrası zaten eşit olmalı)
+    const stemLength = Math.min(4, catStem.length, msgStem.length);
+    if (stemLength < 3) return false;
+    return catStem.slice(0, stemLength) === msgStem.slice(0, stemLength);
   };
 
   const matches = knownCategories.filter((category) => {
-    const normalizedMessage = message.toLowerCase();
-    if (normalizedMessage.includes(category.toLowerCase())) return true;
+    const normalizedMessage = message.toLocaleLowerCase('tr-TR');
+    const normalizedCategory = category.toLocaleLowerCase('tr-TR');
+    if (normalizedMessage.includes(normalizedCategory)) return true;
+
+    // "kaldırım panosu" ↔ "kaldırım panoları" gibi çekimli tam ifade
+    const categoryStemPhrase = category
+      .split(/\s+/)
+      .map((w) => turkishStem(normalizeWord(w)))
+      .filter(Boolean)
+      .join(' ');
+    const messageStemPhrase = messageStems.filter(Boolean).join(' ');
+    if (categoryStemPhrase && messageStemPhrase.includes(categoryStemPhrase)) return true;
 
     const categoryWords = category.split(/\s+/).map(normalizeWord).filter(Boolean);
     return categoryWords.every((catWord) =>
@@ -136,25 +203,127 @@ function looksLikeRankingOrSingleItemQuestion(text: string): boolean {
 }
 
 /**
- * Kullanıcı mesajı KISA ve doğrudan bilinen bir kategori adını içeriyorsa
- * (örn. botun "Afiş Çerçevesi mi, Kaldırım Panosu mu?" sorusuna sadece
- * "afiş çerçevesi" cevabı verildiğinde), bu net bir "kategoriyi listele"
- * isteğidir ve search_products'ı modelin kararına bırakmadan biz doğrudan
- * çalıştırırız (böylece match_count sınırlı baseline aramasına bağlı
- * kalınmaz). Bu tespiti KASITLI OLARAK katı tutuyoruz (tam ifade eşleşmesi +
- * en fazla ~6 kelime + sıralama/tekil ürün sorusu değil) ki "çerçevenin
- * ağırlığı kaç kilo" gibi tekil ürün detay sorularında veya "en ağır afiş
- * çerçevesi hangisi" gibi sıralama sorularında yanlışlıkla tüm kategoriyi
- * kart olarak göstermeyelim (bkz. Tool Output/Message State çakışması bug'ı).
+ * Kullanıcı mesajı bilinen bir kategoriye yönelik "listele / bilgi ver"
+ * isteğiyse, search_products'ı modelin kararına bırakmadan doğrudan
+ * çalıştırırız. Çekim farkları ("Kaldırım Panosu" vs "kaldırım panoları")
+ * findMentionedCategories ile yakalanır. Sıralama/tekil ürün sorularında
+ * tetiklenmez.
  */
 function isLikelyDirectCategoryBrowse(message: string, knownCategories: string[]): string[] {
   if (looksLikeRankingOrSingleItemQuestion(message)) return [];
 
   const wordCount = message.trim().split(/\s+/).filter(Boolean).length;
-  if (wordCount === 0 || wordCount > 6) return [];
+  if (wordCount === 0) return [];
 
-  const normalizedMessage = message.toLowerCase();
-  return knownCategories.filter((category) => normalizedMessage.includes(category.toLowerCase()));
+  const browseIntent =
+    /(hakkında|bilgi|göster|listele|neler var|hangileri|ürünler|almak istiyorum|incelemek|indirimli|kampanya|stokta|bütçe|\btl\b|lira|satın al)/i.test(
+      message
+    );
+
+  // Kısa kategori cevabı ("afiş çerçevesi") veya biraz daha uzun browse
+  // cümlesi ("kaldırım panoları hakkında bilgi almak istiyorum").
+  if (wordCount > 6 && !browseIntent) return [];
+  if (wordCount > 22) return [];
+
+  return findMentionedCategories(message, knownCategories);
+}
+
+/**
+ * Kullanıcı mesajından deterministik arama filtrelerini çıkarır.
+ * Direct category browse yolunda tool çağrısı atlandığı için burada
+ * uygulanmazsa bütçe/indirim/ölçü/stok kriterleri yok sayılır.
+ */
+function extractSearchFiltersFromMessage(message: string): Partial<SearchProductsArgs> {
+  const text = message.toLocaleLowerCase('tr-TR');
+  const filters: Partial<SearchProductsArgs> = {};
+
+  // "1000 TL altı", "bende 1000 lira var", "1000 liram var"
+  const maxPatterns = [
+    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:altı|altında|kadar)/i,
+    /(?:en fazla|maksimum|max\.?|en çok)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?/i,
+    /(?:bütçe(?:m|niz|si)?|param|paramız|bende|elimde|cüzdanımda)\s*(?:ise\s*)?(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira(?:m|mız|nız)?|try)?/i,
+    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira(?:m|mız|nız)?|try)\s*(?:bütçe(?:m|miz)?|param)?\s*var/i,
+    /(?:bende|elimde)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira(?:m|mız|nız)?|try)?\s*var/i,
+  ];
+
+  for (const pattern of maxPatterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      const value = Number(match[1].replace(',', '.'));
+      if (Number.isFinite(value) && value > 0) {
+        filters.max_price = value;
+        break;
+      }
+    }
+  }
+
+  // "1000 TL üzeri/üstünde", "en az 1000"
+  const minPatterns = [
+    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:üzeri|üstünde|üstü|ve üzeri)/i,
+    /(?:en az|minimum|min\.?)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?/i,
+  ];
+
+  for (const pattern of minPatterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      const value = Number(match[1].replace(',', '.'));
+      if (Number.isFinite(value) && value > 0) {
+        filters.min_price = value;
+        break;
+      }
+    }
+  }
+
+  const purchaseIntent =
+    /(almak istiyorum|satın al|sipariş(?: etmek)?|alışveriş|ürün almak|alabilirim|alabilir\s*miyim|alayım|hangisini al|hangilerini al|ne alabilir)/i.test(
+      text
+    );
+
+  if (
+    /(stokta olan|stoktakiler|stokta var|sadece stok|stokta olanlar)/i.test(text) ||
+    purchaseIntent ||
+    // Bütçe sorusu genelde "ne alabilirim" anlamına gelir → stoksuz gösterme
+    filters.max_price != null
+  ) {
+    filters.in_stock_only = true;
+  }
+
+  if (/(indirimli|indirimde|kampanyalı|kampanyada|kampanya)/i.test(text)) {
+    filters.on_discount_only = true;
+  }
+
+  // Boyut kodu: A0-A4 / B1-B3 veya 60x84 / 70x100
+  const sizeCode = text.match(/\b([ab][0-4])\b/i);
+  if (sizeCode?.[1]) {
+    filters.dimension = sizeCode[1].toUpperCase();
+  } else {
+    const measure = text.match(/\b(\d{2,3})\s*[x×]\s*(\d{2,3})\b/i);
+    if (measure) {
+      filters.dimension = `${measure[1]}x${measure[2]}`;
+    }
+  }
+
+  // Renk / görünüm ipuçları
+  const colorHints: { re: RegExp; value: string }[] = [
+    { re: /\bahşap\b/, value: 'ahşap' },
+    { re: /\bkahverengi\b/, value: 'kahverengi' },
+    { re: /\bgümüş\b|\bgumus\b/, value: 'gümüş' },
+    { re: /\bbeyaz\b/, value: 'beyaz' },
+    { re: /\bsiyah\b/, value: 'siyah' },
+    { re: /\bkırmızı\b|\bkirmizi\b/, value: 'kırmızı' },
+  ];
+  for (const hint of colorHints) {
+    if (hint.re.test(text)) {
+      filters.color = hint.value;
+      break;
+    }
+  }
+
+  if (filters.max_price != null && filters.sort_by == null) {
+    filters.sort_by = 'price_asc';
+  }
+
+  return filters;
 }
 
 /**
@@ -167,6 +336,70 @@ function isLikelyDirectCategoryBrowse(message: string, knownCategories: string[]
  * olarak gösterilir.
  */
 const PRODUCT_CARDS_PLACEHOLDER = '[[URUN_KARTLARI]]';
+
+/**
+ * Kartlar gösterilecekken modelin yazdığı numaralı/madde ürün listelerini,
+ * tabloları ve fiyat satırlarını temizler. Prompt kuralı 0 ihlal edilse bile
+ * kullanıcıya çift liste (metin + kart) gitmesin.
+ */
+function sanitizeProductCardReply(text: string): string {
+  const marker = '__CARDS_PLACEHOLDER__';
+  const lines = text.replaceAll(PRODUCT_CARDS_PLACEHOLDER, `\n${marker}\n`).split('\n');
+  const kept: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      kept.push('');
+      continue;
+    }
+    if (trimmed === marker) {
+      kept.push(PRODUCT_CARDS_PLACEHOLDER);
+      continue;
+    }
+
+    // "1. A3 Çerçeve - 670 TL", "2) ..."
+    if (/^\d+[\.\)]\s+/.test(trimmed)) continue;
+    // Markdown tablo
+    if (/^\|/.test(trimmed) && trimmed.includes('|')) continue;
+    if (/^:?-{3,}:?(\s*\|)/.test(trimmed)) continue;
+    // Ürün/fiyat içeren bullet satırlar
+    if (
+      /^[-*•]\s+/.test(trimmed) &&
+      /(tl|₺|stok|indirim|çerçeve|pano|\d+\s*tl)/i.test(trimmed)
+    ) {
+      continue;
+    }
+    // "Ürün Adı: ... | Fiyat: ..." gibi tek satır ürün dökümü
+    if (
+      /ürün adı\s*:/i.test(trimmed) ||
+      (/\|\s*fiyat\s*:/i.test(trimmed) && /\d/.test(trimmed))
+    ) {
+      continue;
+    }
+
+    kept.push(line);
+  }
+
+  let result = kept
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (!result.includes(PRODUCT_CARDS_PLACEHOLDER)) {
+    result = `${result}\n\n${PRODUCT_CARDS_PLACEHOLDER}`.trim();
+  }
+
+  // Placeholder etrafındaki boşlukları sadeleştir
+  result = result
+    .replace(
+      new RegExp(`\\n*${PRODUCT_CARDS_PLACEHOLDER.replace(/[[\]]/g, '\\$&')}\\n*`, 'g'),
+      `\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\n`
+    )
+    .trim();
+
+  return result;
+}
 
 /**
  * "bu ürünün ağırlığı", "indirimli fiyatı nedir", "evet sipariş ver" gibi
@@ -298,6 +531,8 @@ interface SearchProductsArgs {
   min_price?: number;
   in_stock_only?: boolean;
   on_discount_only?: boolean;
+  dimension?: string;
+  color?: string;
   query_text?: string;
   sort_by?: SortBy;
   limit?: number;
@@ -319,7 +554,8 @@ function buildSearchProductsTool(knownCategoriesText: string): ChatCompletionToo
           },
           max_price: {
             type: 'number',
-            description: 'Ürünün fiyatı bu değerden KÜÇÜK OLMALI (TL). Örn. kullanıcı "500 TL altı" derse max_price=500.',
+            description:
+              'Ürünün fiyatı bu değerden KÜÇÜK VEYA EŞİT olmalı (TL). "500 TL altı", "bende 1000 lira var", "bütçem 1000", "1000 TL\'ye kadar" gibi bütçe ifadelerinde max_price=o tutar.',
           },
           min_price: {
             type: 'number',
@@ -333,6 +569,16 @@ function buildSearchProductsTool(knownCategoriesText: string): ChatCompletionToo
             type: 'boolean',
             description:
               'true ise sadece indirimde olan ürünler döner (has_discount=true). Kullanıcı "indirimli ürünler", "kampanyadakiler", "indirimde olanlar" dediğinde true ver.',
+          },
+          dimension: {
+            type: 'string',
+            description:
+              'Boyut/ölçü filtresi. Kullanıcı "A2", "A1 çerçeve", "60x84" derse bu değeri ver (örn. "A2" veya "60x84").',
+          },
+          color: {
+            type: 'string',
+            description:
+              'Renk/görünüm filtresi. Kullanıcı "beyaz", "gümüş", "ahşap desen", "kahverengi", "siyah" derse bu değeri ver.',
           },
           query_text: {
             type: 'string',
@@ -390,6 +636,25 @@ async function executeSearchProducts(
   }
   if (args.on_discount_only) {
     query = query.eq('metadata->>has_discount', 'true');
+  }
+  if (args.dimension && args.dimension.trim()) {
+    const safeDimension = args.dimension.trim().replace(/[(),%]/g, '');
+    if (safeDimension) {
+      query = query.ilike('metadata->>dimension', `%${safeDimension}%`);
+    }
+  }
+  if (args.color && args.color.trim()) {
+    const safeColor = args.color.trim().replace(/[(),%]/g, '');
+    if (safeColor) {
+      // "ahşap" çoğu üründe color değil title/material alanında geçer
+      if (safeColor.toLocaleLowerCase('tr-TR') === 'ahşap') {
+        query = query.or(
+          `metadata->>title.ilike.%${safeColor}%,metadata->>material.ilike.%${safeColor}%`
+        );
+      } else {
+        query = query.ilike('metadata->>color', `%${safeColor}%`);
+      }
+    }
   }
   if (args.query_text && args.query_text.trim()) {
     // Virgül/parantez gibi PostgREST'in `or()` sözdizimini bozabilecek
@@ -472,8 +737,9 @@ Kullanıcı bir fiyat filtresi ("500 TL altı", "1000 TL üzeri"), bir SIRALAMA/
 FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
 0. ÜRÜN VERİSİNİ SADECE KART BİLEŞENİYLE SUN, ASLA TABLO/LİSTE YAZMA (EN ÖNEMLİ KURAL): Aşağıda "ÜRÜN KARTLARI HAZIR" notu verilmişse, bağlamdaki (arama sonucundaki) TÜM ürünler arayüzde otomatik olarak şık, kaydırılabilir kartlar (carousel) halinde cevabına yerleştirilecektir. Bu yüzden cevap METNİNDE ürün detaylarını ASLA tekrarlama:
    - Markdown tablosu YASAK
-   - Madde işaretli / numaralı liste (bullet points) YASAK
-   - Ürün adı, fiyat, stok, ölçü, ağırlık, malzeme, renk, link gibi alanları "- ..." veya "• ..." satırlarıyla yazmak YASAK
+   - Madde işaretli liste YASAK ("- ...", "• ...")
+   - Numaralı liste YASAK ("1. Ürün adı - 750 TL", "2) ..." gibi). Ürünleri ASLA 1-2-3 diye yazma; kartlar zaten gösterecek
+   - Ürün adı, fiyat, stok, ölçü, ağırlık, malzeme, renk, link gibi alanları metinde satır satır dökmek YASAK
    - Tek bir ürün kartı olsa bile metinde o ürünün özelliklerini madde madde dökme
    Metinde SADECE kısa ve kibar bir özet cümle yaz (ör. "Evet, kriterinize uyan indirimli ürünlerimiz aşağıdadır."). Cevabın SADECE şu üç parçadan oluşmalı:
    (1) kısa, nazik bir özet (1-2 cümle; ürün detayı YOK),
@@ -619,21 +885,31 @@ export async function POST(req: NextRequest) {
     // araması yanlış bir ürüne sapsa bile model doğru ürünün ağırlık/fiyat/
     // stok bilgisini görür.
     let pinnedFollowUpProduct = false;
-    const isProductFollowUp = looksLikeProductFollowUp(message) && cleanHistory.length > 0;
-    if (isProductFollowUp) {
-      const { data: titleRows } = await supabase
-        .from('documents')
-        .select('metadata')
-        .eq('metadata->>type', 'product');
-      const productTitles = (titleRows ?? [])
-        .map((row) => (row.metadata as { title?: string } | null)?.title?.trim())
-        .filter((title): title is string => Boolean(title))
-        .sort((a, b) => b.length - a.length);
+    const isReferentialFollowUp = looksLikeProductFollowUp(message) && cleanHistory.length > 0;
 
-      // 1) Metin geçmişinde ürün adı geçiyorsa onu kullan.
-      // 2) Kartlı yanıtlarda ürün adı metinde OLMAYABİLİR (Kural 0); bu durumda
-      //    sohbetteki son asistan mesajının sources alanından ürünü çıkar.
-      let lastProductTitle = resolveLastDiscussedProductTitle(cleanHistory, productTitles);
+    // Ürün başlıklarını her zaman çek: "Bilgi al" tıklamasında mevcut mesajda
+    // tam ürün adı vardır; bunu geçmişteki eski ürüne tercih etmeliyiz.
+    const { data: titleRows } = await supabase
+      .from('documents')
+      .select('metadata')
+      .eq('metadata->>type', 'product');
+    const productTitles = (titleRows ?? [])
+      .map((row) => (row.metadata as { title?: string } | null)?.title?.trim())
+      .filter((title): title is string => Boolean(title))
+      .sort((a, b) => b.length - a.length);
+
+    const mentionedInCurrentMessage = findMentionedProductTitle(message, productTitles);
+
+    if (mentionedInCurrentMessage || isReferentialFollowUp) {
+      // Öncelik:
+      // 1) BU mesajda açıkça adı geçen ürün (Bilgi al tıklaması).
+      // 2) Sohbet geçmişinde en son adı geçen ürün.
+      // 3) Kartlı yanıtlarda metinde ad yoksa son asistan sources'undan çıkar.
+      let lastProductTitle = mentionedInCurrentMessage;
+
+      if (!lastProductTitle) {
+        lastProductTitle = resolveLastDiscussedProductTitle(cleanHistory, productTitles);
+      }
 
       if (!lastProductTitle && typeof conversationId === 'string') {
         const { data: lastAssistantRow } = await supabase
@@ -650,17 +926,15 @@ export async function POST(req: NextRequest) {
           : [];
         const sourceTitles = sourceDocs
           .map((doc) => doc.metadata?.title?.trim())
-          .filter((title): title is string => Boolean(title));
+          .filter((title): title is string => Boolean(title))
+          .sort((a, b) => b.length - a.length);
+
         if (sourceTitles.length === 1) {
           lastProductTitle = sourceTitles[0];
         } else if (sourceTitles.length > 1) {
-          // Birden fazla kart gösterildiyse en son kullanıcı mesajındaki
-          // ipuçlarıyla eşleşeni seç; yoksa listedeki ilkini alma, metin
-          // geçmişine yeniden bak (zaten denendi) — tekil takip için en
-          // güvenlisi tek kartlı yanıtlardır.
           lastProductTitle =
-            resolveLastDiscussedProductTitle(cleanHistory, sourceTitles.sort((a, b) => b.length - a.length)) ??
-            sourceTitles[0];
+            findMentionedProductTitle(message, sourceTitles) ??
+            resolveLastDiscussedProductTitle(cleanHistory, sourceTitles);
         }
       }
 
@@ -794,11 +1068,17 @@ export async function POST(req: NextRequest) {
     // tool çıktısından gelir" kuralını bozmaz; sadece ekstra bir ilk model
     // çağrısına (tool_choice kararına) ihtiyaç duymadan aynı sonuca ulaşır.
     const directCategoryMatches = isLikelyDirectCategoryBrowse(message, knownCategories);
+    const messageFilters = extractSearchFiltersFromMessage(message);
 
     if (directCategoryMatches.length > 0) {
       const categoryResultDocs: MatchedDocument[] = [];
       for (const category of directCategoryMatches) {
-        categoryResultDocs.push(...(await executeSearchProducts(supabase, knownCategories, { category })));
+        categoryResultDocs.push(
+          ...(await executeSearchProducts(supabase, knownCategories, {
+            category,
+            ...messageFilters,
+          }))
+        );
       }
       const seen = new Set<string>();
       documents = categoryResultDocs.filter((doc) => {
@@ -884,9 +1164,23 @@ export async function POST(req: NextRequest) {
             console.error('search_products argümanları parse edilemedi:', parseError);
           }
 
+          // Model parametre unutursa bile mesajdan çıkarılan sert filtreler uygulanır
+          // (bütçe, stok, indirim, ölçü, renk). Modelin verdiği değer önceliklidir.
+          const mergedArgs: SearchProductsArgs = {
+            ...messageFilters,
+            ...args,
+            max_price: args.max_price ?? messageFilters.max_price,
+            min_price: args.min_price ?? messageFilters.min_price,
+            in_stock_only: Boolean(args.in_stock_only || messageFilters.in_stock_only),
+            on_discount_only: Boolean(args.on_discount_only || messageFilters.on_discount_only),
+            dimension: args.dimension || messageFilters.dimension,
+            color: args.color || messageFilters.color,
+            sort_by: args.sort_by || messageFilters.sort_by,
+          };
+
           const results =
             toolCall.function.name === 'search_products'
-              ? await executeSearchProducts(supabase, knownCategories, args)
+              ? await executeSearchProducts(supabase, knownCategories, mergedArgs)
               : [];
 
           toolResultDocs.push(...results);
@@ -971,11 +1265,16 @@ export async function POST(req: NextRequest) {
     // unutursa (nadiren olabilir) yanıtın sonuna ekleyerek kartların her
     // durumda kullanıcıya ulaşmasını garantiliyoruz; ürün kartı yoksa
     // olası bir yanlış kullanımı temizliyoruz.
-    const reply = hasProductCards
+    const replyWithPlaceholder = hasProductCards
       ? rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)
         ? rawReply
         : `${rawReply}\n\n${PRODUCT_CARDS_PLACEHOLDER}`
       : rawReply.replaceAll(PRODUCT_CARDS_PLACEHOLDER, '');
+
+    // Model yine de 1-2-3 ürün listesi yazarsa sunucuda temizle (kart + metin tekrarı olmasın).
+    const reply = hasProductCards
+      ? sanitizeProductCardReply(replyWithPlaceholder)
+      : replyWithPlaceholder;
 
     // 5. Sohbeti ve mesajları kalıcı olarak sakla.
     const conversationResult = await ensureConversation(

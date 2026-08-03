@@ -117,7 +117,7 @@ export default function Home() {
     }
   }, [userId, authLoading, fetchConversations]);
 
-  const upsertConversationSummary = (id: string, title: string | null) => {
+  const upsertConversationSummary = useCallback((id: string, title: string | null) => {
     setConversations((prev) => {
       const now = new Date().toISOString();
       const existing = prev.find((c) => c.id === id);
@@ -127,7 +127,7 @@ export default function Home() {
       const rest = prev.filter((c) => c.id !== id);
       return [updated, ...rest];
     });
-  };
+  }, []);
 
   const handleNewChat = async () => {
     setSidebarOpen(false);
@@ -180,68 +180,82 @@ export default function Home() {
     }
   };
 
+  const sendMessage = useCallback(
+    async (rawMessage: string) => {
+      // historyLoading tamamlanmadan mesaj gönderilirse conversationId henüz
+      // set edilmemiş olabilir; bu, aynı kullanıcı için yanlışlıkla ikinci bir
+      // sohbet oturumu oluşmasına (ve görünen geçmişin "kaybolmasına") yol açar.
+      const userMessage = rawMessage.trim();
+      if (!userMessage || loading || historyLoading) return;
+
+      // Karşılama mesajını OpenAI geçmişine gönderme; aksi halde model onu
+      // gerçek bir asistan turu sanıp bağlamı bozabiliyor.
+      const historyForRequest = messages
+        .filter((msg) => !msg.content.startsWith('❌'))
+        .filter((msg) => msg.content !== WELCOME_MESSAGE.content)
+        .map((msg) => ({ role: msg.role, content: msg.content }));
+
+      setInput('');
+      setMessages((prev) => [
+        ...prev,
+        { role: 'user', content: userMessage, timestamp: Date.now() },
+      ]);
+      setLoading(true);
+
+      try {
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: userMessage,
+            history: historyForRequest,
+            conversationId,
+          }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Bir hata oluştu');
+        }
+
+        if (data.conversationId) {
+          setConversationId(data.conversationId);
+          upsertConversationSummary(data.conversationId, data.conversationTitle ?? null);
+        }
+
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: data.reply, sources: data.sources, timestamp: Date.now() },
+        ]);
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : 'Yanıt alınamadı.';
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `❌ Hata: ${errorMessage}`,
+            timestamp: Date.now(),
+          },
+        ]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [loading, historyLoading, messages, conversationId, upsertConversationSummary]
+  );
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // historyLoading tamamlanmadan mesaj gönderilirse conversationId henüz
-    // set edilmemiş olabilir; bu, aynı kullanıcı için yanlışlıkla ikinci bir
-    // sohbet oturumu oluşmasına (ve görünen geçmişin "kaybolmasına") yol açar.
-    if (!input.trim() || loading || historyLoading) return;
-
-    const userMessage = input.trim();
-    // Karşılama mesajını OpenAI geçmişine gönderme; aksi halde model onu
-    // gerçek bir asistan turu sanıp bağlamı bozabiliyor.
-    const historyForRequest = messages
-      .filter((msg) => !msg.content.startsWith('❌'))
-      .filter((msg) => msg.content !== WELCOME_MESSAGE.content)
-      .map((msg) => ({ role: msg.role, content: msg.content }));
-
-    setInput('');
-    setMessages((prev) => [
-      ...prev,
-      { role: 'user', content: userMessage, timestamp: Date.now() },
-    ]);
-    setLoading(true);
-
-    try {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: userMessage,
-          history: historyForRequest,
-          conversationId,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Bir hata oluştu');
-      }
-
-      if (data.conversationId) {
-        setConversationId(data.conversationId);
-        upsertConversationSummary(data.conversationId, data.conversationTitle ?? null);
-      }
-
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: data.reply, sources: data.sources, timestamp: Date.now() },
-      ]);
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Yanıt alınamadı.';
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: `❌ Hata: ${errorMessage}`,
-          timestamp: Date.now(),
-        },
-      ]);
-    } finally {
-      setLoading(false);
-    }
+    await sendMessage(input);
   };
+
+  const handleAskAboutProduct = useCallback(
+    (productTitle: string) => {
+      void sendMessage(`${productTitle} hakkında detaylı bilgi verir misin?`);
+    },
+    [sendMessage]
+  );
 
   // Giriş yapılmadan RAG asistanına erişilemez: önce yükleme, sonra
   // giriş/kayıt ekranı gösterilir; chat arayüzü yalnızca girişli kullanıcıya açılır.
@@ -309,7 +323,14 @@ export default function Home() {
             )}
 
             {!historyLoading &&
-              messages.map((msg, index) => <ChatMessage key={index} message={msg} />)}
+              messages.map((msg, index) => (
+                <ChatMessage
+                  key={index}
+                  message={msg}
+                  onAskAboutProduct={handleAskAboutProduct}
+                  askDisabled={loading || historyLoading}
+                />
+              ))}
 
             {loading && (
               <div className="flex items-end gap-2">

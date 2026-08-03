@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowUpRight } from 'lucide-react';
+import { ArrowUpRight, MessageCircle } from 'lucide-react';
 import type { DocumentSource } from './SourcesAccordion';
 
 export interface ProductCardData {
@@ -57,7 +57,15 @@ function formatPrice(price?: number | null): string {
 // kalır (2 satırlık kart yüksekliğiyle sınırlıdır).
 const MULTI_ROW_THRESHOLD = 10;
 
-export default function ProductCarousel({ products }: { products: ProductCardData[] }) {
+export default function ProductCarousel({
+  products,
+  onAskAboutProduct,
+  askDisabled = false,
+}: {
+  products: ProductCardData[];
+  onAskAboutProduct?: (productTitle: string) => void;
+  askDisabled?: boolean;
+}) {
   if (products.length === 0) return null;
 
   const hasMultipleCategories =
@@ -122,21 +130,37 @@ export default function ProductCarousel({ products }: { products: ProductCardDat
                   : 'Stokta yok'
                 : 'Stok bilgisi yok'}
             </span>
-            {product.url ? (
-              <a
-                href={product.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-2.5 inline-flex items-center justify-center gap-1 rounded-lg bg-gradient-to-r from-red-600 to-red-500 px-3 py-1.5 text-[11px] font-medium text-white shadow-sm shadow-red-600/20 transition-shadow hover:shadow-md hover:shadow-red-600/30"
-              >
-                İncele
-                <ArrowUpRight className="h-3 w-3" />
-              </a>
-            ) : (
-              <span className="mt-2.5 inline-flex items-center justify-center rounded-lg border border-neutral-200 px-3 py-1.5 text-[11px] font-medium text-neutral-400">
-                Detay yok
-              </span>
-            )}
+
+            <div className="mt-2.5 flex flex-col gap-1.5">
+              {onAskAboutProduct && (
+                <button
+                  type="button"
+                  disabled={askDisabled}
+                  onClick={() => onAskAboutProduct(product.title)}
+                  className="inline-flex items-center justify-center gap-1 rounded-lg bg-gradient-to-r from-red-600 to-red-500 px-3 py-1.5 text-[11px] font-medium text-white shadow-sm shadow-red-600/20 transition-shadow hover:shadow-md hover:shadow-red-600/30 disabled:opacity-50"
+                >
+                  <MessageCircle className="h-3 w-3" />
+                  Bilgi al
+                </button>
+              )}
+              {product.url ? (
+                <a
+                  href={product.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-[11px] font-medium text-neutral-600 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-700"
+                >
+                  Mağazada aç
+                  <ArrowUpRight className="h-3 w-3" />
+                </a>
+              ) : (
+                !onAskAboutProduct && (
+                  <span className="inline-flex items-center justify-center rounded-lg border border-neutral-200 px-3 py-1.5 text-[11px] font-medium text-neutral-400">
+                    Detay yok
+                  </span>
+                )
+              )}
+            </div>
           </div>
         );
       })}

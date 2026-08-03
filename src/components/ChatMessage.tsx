@@ -28,7 +28,15 @@ function formatTime(timestamp?: number): string {
   });
 }
 
-export default function ChatMessage({ message }: { message: ChatMessageData }) {
+export default function ChatMessage({
+  message,
+  onAskAboutProduct,
+  askDisabled = false,
+}: {
+  message: ChatMessageData;
+  onAskAboutProduct?: (productTitle: string) => void;
+  askDisabled?: boolean;
+}) {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === 'user';
 
@@ -80,7 +88,13 @@ export default function ChatMessage({ message }: { message: ChatMessageData }) {
               </div>
             )}
 
-            {showCarousel && <ProductCarousel products={productCards} />}
+            {showCarousel && (
+              <ProductCarousel
+                products={productCards}
+                onAskAboutProduct={onAskAboutProduct}
+                askDisabled={askDisabled}
+              />
+            )}
 
             {afterText && (
               <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-white text-neutral-800 rounded-bl-md border border-neutral-200 shadow-sm shadow-neutral-900/5">

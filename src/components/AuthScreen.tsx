@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Bot, Lock, Loader2, Mail, Sparkles, User } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 
@@ -19,6 +19,19 @@ export default function AuthScreen() {
   const [error, setError] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const authError = params.get('authError');
+    if (authError === 'email_confirm_failed') {
+      setError('E-posta doğrulama başarısız oldu. Lütfen tekrar kayıt olun veya yeni bir doğrulama maili isteyin.');
+    } else if (authError === 'missing_code') {
+      setError('Doğrulama bağlantısı geçersiz veya eksik. E-postanızdaki linki tekrar kullanın.');
+    }
+    if (authError) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
   const switchMode = (next: Mode) => {
     setMode(next);
     setError(null);
@@ -36,14 +49,23 @@ export default function AuthScreen() {
     try {
       if (mode === 'login') {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        if (error) {
+          if (/email not confirmed/i.test(error.message)) {
+            throw new Error(
+              'E-posta adresiniz henüz doğrulanmamış. Lütfen gelen kutunuzu (ve spam klasörünü) kontrol edin.'
+            );
+          }
+          throw error;
+        }
         // Başarılı girişte AuthContext session'ı güncelleyip chat ekranını açacak.
       } else {
         const trimmedName = fullName.trim();
+        const emailRedirectTo = `${window.location.origin}/auth/callback`;
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
           options: {
+            emailRedirectTo,
             data: {
               full_name: trimmedName,
             },
@@ -53,7 +75,7 @@ export default function AuthScreen() {
 
         if (!data.session) {
           setInfoMessage(
-            'Kayıt başarılı! Lütfen e-postanıza gelen bağlantıyla hesabınızı onaylayıp giriş yapın.'
+            'Kayıt başarılı! Hesabınızı etkinleştirmek için e-postanıza gönderilen doğrulama bağlantısına tıklayın. Mail gelmezse spam/junk klasörünü kontrol edin.'
           );
           setMode('login');
         }
@@ -155,7 +177,7 @@ export default function AuthScreen() {
             <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>
           )}
           {infoMessage && (
-            <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-600">
+            <p className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
               {infoMessage}
             </p>
           )}
