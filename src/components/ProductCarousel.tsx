@@ -7,6 +7,8 @@ export interface ProductCardData {
   title: string;
   dimension?: string;
   price?: number | null;
+  listPrice?: number | null;
+  hasDiscount?: boolean;
   stock?: number;
   url?: string;
   category?: string;
@@ -21,14 +23,26 @@ export function extractProductCards(sources?: DocumentSource[]): ProductCardData
   if (!sources) return [];
   return sources
     .filter((source) => source.metadata?.type === 'product')
-    .map((source) => ({
-      title: source.metadata?.title ?? source.metadata?.name ?? 'Ürün',
-      dimension: source.metadata?.dimension,
-      price: source.metadata?.price,
-      stock: source.metadata?.stock,
-      url: source.metadata?.url,
-      category: source.metadata?.category,
-    }));
+    .map((source) => {
+      const price = source.metadata?.price;
+      const listPrice = source.metadata?.list_price;
+      const hasDiscount =
+        source.metadata?.has_discount === true &&
+        typeof listPrice === 'number' &&
+        typeof price === 'number' &&
+        listPrice > price;
+
+      return {
+        title: source.metadata?.title ?? source.metadata?.name ?? 'Ürün',
+        dimension: source.metadata?.dimension,
+        price,
+        listPrice,
+        hasDiscount,
+        stock: source.metadata?.stock,
+        url: source.metadata?.url,
+        category: source.metadata?.category,
+      };
+    });
 }
 
 function formatPrice(price?: number | null): string {
@@ -78,7 +92,25 @@ export default function ProductCarousel({ products }: { products: ProductCardDat
             {product.dimension && (
               <p className="mt-0.5 text-[11px] text-neutral-500">{product.dimension}</p>
             )}
-            <span className="mt-2 text-sm font-bold text-red-600">{formatPrice(product.price)}</span>
+            <div className="mt-2 flex min-h-[2.5rem] flex-col justify-end gap-0.5">
+              {product.hasDiscount && typeof product.listPrice === 'number' ? (
+                <>
+                  <span className="text-[11px] text-neutral-400 line-through decoration-neutral-400">
+                    {formatPrice(product.listPrice)}
+                  </span>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-sm font-bold text-red-600">
+                      {formatPrice(product.price)}
+                    </span>
+                    <span className="rounded bg-red-50 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-red-600">
+                      İndirim
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <span className="text-sm font-bold text-red-600">{formatPrice(product.price)}</span>
+              )}
+            </div>
             <span
               className={`mt-1 text-[11px] font-medium ${
                 inStock ? 'text-emerald-600' : 'text-neutral-400'

@@ -16,6 +16,8 @@ export interface DocumentMetadata {
   color?: string;
   weight_kg?: number | null;
   price?: number | null;
+  list_price?: number | null;
+  has_discount?: boolean;
   stock?: number;
   url?: string;
 }
