@@ -85,6 +85,7 @@ const POLICY_KEYWORDS = [
   'kdv', 'vkn', 'vergi', 'kurumsal', 'iyzico', 'havale', 'eft', 'taksit',
   'iban', 'nakit', 'kapıda', 'kapida', 'cod',
   'iptal', 'acil', 'telefon', 'mesai', 'değişiklik', 'degisiklik',
+  'hasar', 'kirik', 'kırık', 'tutanak', 'yanlis urun', 'yanlış ürün',
   'iletisim', 'iletişim', 'sikayet', 'şikayet', 'sozlesme', 'sözleşme',
   'tahkim', 'sms', 'politika', 'hasarli', 'hasarlı', 'kusurlu', 'yasal',
 ];
@@ -796,6 +797,27 @@ function returnPolicyHint(message: string): string {
 }
 
 /**
+ * Hasarlı/kusurlu/yanlış ürün: genel iade belirsizliğine düşmeden doğru süreci ver.
+ */
+function damagedProductHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  if (
+    !/(hasar|hasarlı|hasarli|kusur|kusurlu|kırık|kirik|bozuk|ezik|çatlak|catlak|yanlış ürün|yanlis urun|eksik ürün|eksik urun|tutanak)/i.test(
+      text
+    )
+  ) {
+    return '';
+  }
+
+  return [
+    'HASARLI / KUSURLU / YANLIŞ ÜRÜN (KESİN): Müşteriye "genel iadede kargo kimi öder belirsiz" diye yetinme. Bu durumda derhal iletisim@ores.com.tr (+ gerekirse telefon) ile iletişime geçmesini söyle; ORES sorunu değerlendirip düzeltir.',
+    'İade talebi kabul edilirse ORES iade kargo etiketi ve gönderim talimatı gönderir — etiket sürecini belirt. "Kargo ücretini kesin siz ödersiniz" veya "kesin biz öderiz" diye belgede olmayan kesin cümle UYDURMA; süreç iletişim + etiket üzerinden yürür.',
+    'Teslim anında paket hasarlı/eksik/açılmışsa: mümkünse kargo görevlisi yanında tutanak tutulmalı, paket öyle teslim alınmamalıydı; yine de ORES ile iletişime geçilsin.',
+    'İade talebi oluşturmadan ürünü kendi başına göndermesin.',
+  ].join('\n');
+}
+
+/**
  * Acil sipariş / mesai dışı telefon / iptal tehdidi: çalışma saatleri + doğru kanal.
  */
 function urgentSupportHint(message: string): string {
@@ -843,6 +865,7 @@ function withPolicyHints(message: string, contextText: string): string {
     shippingThresholdHint(message),
     paymentMethodsHint(message),
     undocumentedCheckoutHint(message),
+    damagedProductHint(message),
     returnPolicyHint(message),
     urgentSupportHint(message),
   ].filter(Boolean);
@@ -1133,7 +1156,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA): Kullanıcı kargo, iade, garanti, ödeme, fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 TL eşiği; genel iade 14 gün; ödeme YALNIZCA Visa/Mastercard/iyzico/havale-EFT. Kapıda nakit/teslimatta ödeme/COD YOK — "yapabilirsiniz" UYDURMA. IBAN numarası belgede yok; uydurma, iletişime yönlendir. İNDİRİMLİ ürün iadesi: Hayır. Belgede yazmayan fatura/baskı için uydurma; Kural 12 iletişim.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA): Kullanıcı kargo, iade, garanti, ödeme, fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 TL eşiği; genel iade 14 gün; ödeme YALNIZCA Visa/Mastercard/iyzico/havale-EFT. Kapıda nakit/COD YOK. IBAN uydurma. İNDİRİMLİ iade: Hayır. HASARLI/KUSURLU/YANLIŞ ürün: derhal iletişim; ORES değerlendirir; kabulde iade kargo etiketi — "kargo kesin siz/biz" uydurma. Belgede yazmayan fatura/baskı için uydurma; Kural 12 iletişim.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
 ${
   toolActive
