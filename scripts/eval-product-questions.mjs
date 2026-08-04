@@ -208,6 +208,26 @@ const CASES = [
     mustNotInclude: [/poster\s*swing|5310|kaldırım\s*reklam/i],
     minProductSources: 3,
   },
+  {
+    name: 'Çıplak evet: teklife panosu pinleme',
+    history: [
+      { role: 'user', content: '800 lira altında' },
+      {
+        role: 'assistant',
+        content:
+          'Hayır, "Kaldırım Panosu" kategorisinde 800 TL ve altında ürün bulunmamaktadır. Daha yüksek bir bütçe veya başka bir kategori (ör. afiş çerçevesi) denemek ister misiniz?',
+      },
+    ],
+    q: 'evet ,',
+    mustInclude: [/\[\[URUN_KARTLARI\]\]/i, /çerçeve|afiş/i],
+    mustNotInclude: [
+      /bulunmamaktadır/i,
+      /poster\s*swing/i,
+      /5310/,
+      /"Kaldırım Panosu"/i,
+    ],
+    minProductSources: 3,
+  },
 ];
 
 const email = `eval-prod-${Date.now()}@wed1ng.shop`;

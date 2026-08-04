@@ -490,6 +490,40 @@ function looksLikeAcceptAlternateCategory(message: string): boolean {
   return false;
 }
 
+/** "evet" / "evet ," / "tamam" — tek başına onay */
+function looksLikeBareAffirmative(message: string): boolean {
+  const t = message
+    .toLocaleLowerCase('tr-TR')
+    .trim()
+    .replace(/[,.!;:…]+$/g, '')
+    .trim();
+  return /^(evet|tamam|olur|ok|okay|peki|tabii|tabi|isterim)$/i.test(t);
+}
+
+/** Son asistan "başka kategori / daha yüksek bütçe?" teklifi yaptı mı */
+function lastAssistantOfferedAlternateCategory(history: HistoryTurn[]): boolean {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i].role !== 'assistant') continue;
+    return /(başka\s+(bir\s+)?kategori|diğer\s+kategori|yüksek\s+bir\s+bütçe|ör\.\s*afiş|örneğin\s*afiş)/i.test(
+      history[i].content
+    );
+  }
+  return false;
+}
+
+/** Açık pivot VEYA asistan teklifine çıplak "evet" */
+function shouldAcceptAlternateCategory(
+  message: string,
+  history: HistoryTurn[]
+): boolean {
+  if (history.length === 0) return false;
+  if (looksLikeAcceptAlternateCategory(message)) return true;
+  return (
+    looksLikeBareAffirmative(message) &&
+    lastAssistantOfferedAlternateCategory(history)
+  );
+}
+
 /** Son kullanıcı mesajlarından bütçe (max_price) taşı */
 function inferMaxPriceFromHistory(history: HistoryTurn[]): number | null {
   for (let i = history.length - 1; i >= 0; i -= 1) {
@@ -2064,7 +2098,15 @@ export async function POST(req: NextRequest) {
     // araması yanlış bir ürüne sapsa bile model doğru ürünün ağırlık/fiyat/
     // stok bilgisini görür.
     let pinnedFollowUpProduct = false;
-    const isReferentialFollowUp = looksLikeProductFollowUp(message) && cleanHistory.length > 0;
+    // "evet ," + önceki "başka kategori ister misiniz?" → pin DEĞİL, alternatif arama
+    const acceptAlternateCategory = shouldAcceptAlternateCategory(
+      message,
+      cleanHistory
+    );
+    const isReferentialFollowUp =
+      !acceptAlternateCategory &&
+      looksLikeProductFollowUp(message) &&
+      cleanHistory.length > 0;
 
     // Ürün başlıklarını her zaman çek: "Bilgi al" tıklamasında mevcut mesajda
     // tam ürün adı vardır; bunu geçmişteki eski ürüne tercih etmeliyiz.
@@ -2256,9 +2298,13 @@ export async function POST(req: NextRequest) {
       const followUpDerived = buildDerivedPromptFields(documents, false);
       // "incelemek / göstermek isterim" → kart da gelsin; sadece metin detayda
       // "aşağıda" deyip kartsız kalmasın (kaldırım panosu stok=0 senaryosu).
+      // Çıplak "evet" kart açmasın (bütçe/kategori teklifine evet → pin yoluna düşmemeli;
+      // yine düşerse Poster Swing kartı basılmasın).
       const wantsCardWithDetail =
         /(incele|göster|kart|ürünü\s*gör|aşağıda)/i.test(message) ||
-        /^(evet|tamam|olur)\b/i.test(message.trim());
+        (/^(evet|tamam|olur)\b/i.test(message.trim()) &&
+          !looksLikeBareAffirmative(message) &&
+          /(bilgi|detay|ürün|sipariş|satın|incele)/i.test(message));
       const productDocs = documents.filter((doc) => doc.metadata?.type === 'product');
       hasProductCards = wantsCardWithDetail && productDocs.length > 0;
 
@@ -2331,8 +2377,8 @@ export async function POST(req: NextRequest) {
     const directCategoryMatches = isLikelyDirectCategoryBrowse(message, knownCategories);
     const messageFilters = extractSearchFiltersFromMessage(message);
 
-    // "evet başka kategoride olsun" — pin'i kır; önerilen kategori + geçmiş bütçe
-    if (looksLikeAcceptAlternateCategory(message) && cleanHistory.length > 0) {
+    // "evet" / "evet başka kategoride" — pin'i kır; önerilen kategori + geçmiş bütçe
+    if (acceptAlternateCategory) {
       const altCategory =
         findMentionedCategories(message, knownCategories)[0] ??
         inferSuggestedAlternateCategory(cleanHistory, knownCategories);
@@ -2399,10 +2445,14 @@ export async function POST(req: NextRequest) {
           budget != null ? ` için ${budget} TL altında` : ''
         } şu an uygun ürün bulamadım. Bütçeyi yükseltmek veya başka bir filtre denemek ister misiniz?`;
         hasProductCards = false;
-      } else if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
+      } else if (
+        !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER) ||
+        /bulunmamaktadır|ürün yok|bulunamadı/i.test(rawReply)
+      ) {
         rawReply = `"${altCategory}" kategorisinde${
           budget != null ? ` ${budget} TL altındaki` : ''
         } ürünlerimizi aşağıda inceleyebilirsiniz:\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nİlgilendiğiniz bir model var mı?`;
+        hasProductCards = true;
       }
     } else if (wantsAllCatalogProducts(message)) {
       documents = await executeSearchProducts(supabase, knownCategories, {
