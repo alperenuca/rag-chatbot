@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Bot, Check, Copy, User } from 'lucide-react';
 import MarkdownContent from './MarkdownContent';
 import ProductCarousel, { extractProductCards } from './ProductCarousel';
-import type { DocumentSource } from './SourcesAccordion';
+import SourcesAccordion, { type DocumentSource } from './SourcesAccordion';
 
 export interface ChatMessageData {
   role: 'user' | 'assistant';
@@ -107,6 +107,8 @@ export default function ChatMessage({
                 <MarkdownContent content={message.content} />
               </div>
             )}
+
+            {!isUser && <SourcesAccordion sources={message.sources} />}
           </div>
         )}
 

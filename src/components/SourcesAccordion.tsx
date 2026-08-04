@@ -51,6 +51,12 @@ function getTypeLabel(type?: string): string {
   return 'Belge';
 }
 
+function getSourceFileLabel(source?: string, type?: string): string {
+  if (source === 'urunler.csv' || type === 'product') return 'urunler.csv';
+  if (source === 'politikalar.md' || type === 'policy') return 'politikalar.md';
+  return source?.trim() || 'belge';
+}
+
 function SourceTypeIcon({ type }: { type?: string }) {
   const className = 'w-3.5 h-3.5';
   if (type === 'product') return <Package className={className} />;
@@ -62,6 +68,11 @@ function SourceCard({ source }: { source: DocumentSource }) {
   const [expanded, setExpanded] = useState(false);
   const title = getSourceTitle(source);
   const typeLabel = getTypeLabel(source.metadata?.type);
+  const fileLabel = getSourceFileLabel(source.metadata?.source, source.metadata?.type);
+  const sku =
+    source.metadata?.type === 'product' && source.metadata?.sku
+      ? String(source.metadata.sku)
+      : null;
   const similarityPct =
     typeof source.similarity === 'number' ? Math.round(source.similarity * 100) : null;
 
@@ -77,7 +88,13 @@ function SourceCard({ source }: { source: DocumentSource }) {
           <span className="flex-shrink-0 text-red-500">
             <SourceTypeIcon type={source.metadata?.type} />
           </span>
-          <span className="truncate text-xs font-medium text-neutral-800">{title}</span>
+          <div className="min-w-0 flex flex-col gap-0.5">
+            <span className="truncate text-xs font-medium text-neutral-800">{title}</span>
+            <span className="truncate text-[10px] font-mono text-neutral-400">
+              {fileLabel}
+              {sku ? ` · ${sku}` : ''}
+            </span>
+          </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <span className="hidden sm:inline-block text-[10px] uppercase tracking-wide font-semibold text-red-700 bg-red-50 px-2 py-0.5 rounded-full">
@@ -95,6 +112,7 @@ function SourceCard({ source }: { source: DocumentSource }) {
       </button>
       {expanded && (
         <div className="px-3 pb-3 pt-1 border-t border-neutral-100">
+          <p className="mb-1.5 text-[10px] font-mono text-neutral-400">{fileLabel}</p>
           <p className="text-xs text-neutral-600 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
             {source.content}
           </p>

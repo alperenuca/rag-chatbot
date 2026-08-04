@@ -21,14 +21,62 @@ interface HistoryTurn {
 }
 
 interface MatchedDocument {
+  id?: string | number;
   content: string;
+  similarity?: number;
   metadata?: {
     title?: string;
     url?: string;
     type?: string;
     category?: string;
+    source?: string;
+    sku?: string;
     [key: string]: unknown;
   };
+}
+
+const MAX_CITATION_SOURCES = 5;
+
+/**
+ * Yanıtta kullanılan ürün/politika kayıtlarını UI "Kaynaklar" paneli için hazırlar.
+ * Ürün kartlı cevaplarda ürünler; aksi halde bağlamdaki policy (+ varsa ürün) chunk'ları.
+ */
+function buildCitationSources(
+  documents: MatchedDocument[],
+  hasProductCards: boolean
+): MatchedDocument[] {
+  if (!documents.length) return [];
+
+  const seen = new Set<string>();
+  const dedupe = (docs: MatchedDocument[]) =>
+    docs.filter((doc) => {
+      const key = `${doc.metadata?.type ?? ''}|${doc.metadata?.source ?? ''}|${
+        doc.metadata?.title ?? doc.metadata?.sku ?? doc.content.slice(0, 80)
+      }`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+  const bySimilarity = (docs: MatchedDocument[]) =>
+    [...docs].sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0));
+
+  if (hasProductCards) {
+    const products = documents.filter((doc) => doc.metadata?.type === 'product');
+    return bySimilarity(dedupe(products)).slice(0, MAX_CITATION_SOURCES);
+  }
+
+  // Politika / karışık: önce policy, boşsa ürünler, yoksa tüm bağlam
+  const policies = documents.filter((doc) => doc.metadata?.type === 'policy');
+  const products = documents.filter((doc) => doc.metadata?.type === 'product');
+  const pool =
+    policies.length > 0
+      ? [...bySimilarity(policies), ...bySimilarity(products)]
+      : products.length > 0
+        ? bySimilarity(products)
+        : bySimilarity(documents);
+
+  return dedupe(pool).slice(0, MAX_CITATION_SOURCES);
 }
 
 // OpenAI'a gönderilecek geçmiş uzunluğunu makul bir sınırda tut.
@@ -2573,11 +2621,8 @@ export async function POST(req: NextRequest) {
     );
     const activeConversationId = conversationResult?.id ?? null;
 
-    // Kart paneli gösterilmiyorsa sources'a baseline vektör çöpü yazma;
-    // kart gösteriliyorsa yalnızca o yanıta ait ürün dokümanlarını sakla.
-    const sourcesToPersist = hasProductCards
-      ? documents.filter((doc) => doc.metadata?.type === 'product')
-      : null;
+    // Cevapta kullanılan urunler.csv / politikalar.md kayıtlarını kaynak olarak dön.
+    const citationSources = buildCitationSources(documents, hasProductCards);
 
     if (activeConversationId) {
       const { error: insertError } = await supabase.from('messages').insert([
@@ -2592,7 +2637,7 @@ export async function POST(req: NextRequest) {
           user_id: user.id,
           role: 'assistant',
           content: reply,
-          sources: sourcesToPersist,
+          sources: citationSources.length > 0 ? citationSources : null,
         },
       ]);
 
@@ -2608,7 +2653,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       reply,
-      sources: sourcesToPersist ?? [],
+      sources: citationSources,
       conversationId: activeConversationId,
       conversationTitle: conversationResult?.title ?? null,
     });
