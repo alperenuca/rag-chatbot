@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { BookOpen, ChevronDown, FileText, Package } from 'lucide-react';
+import MarkdownContent from './MarkdownContent';
 
 export interface DocumentMetadata {
   source?: string;
@@ -57,6 +58,35 @@ function getSourceFileLabel(source?: string, type?: string): string {
   return source?.trim() || 'belge';
 }
 
+/** Kart başlığıyla aynı ## satırını ve gereksiz --- ayırıcıları temizle. */
+function getDisplayContent(source: DocumentSource, title: string): string {
+  let text = source.content.trim();
+
+  // İlk satır başlıkla aynıysa (## 5. Hasarlı...) çıkar
+  const lines = text.split('\n');
+  if (lines.length > 0) {
+    const first = lines[0].replace(/^#{1,3}\s*/, '').trim();
+    if (first === title || first.toLocaleLowerCase('tr-TR') === title.toLocaleLowerCase('tr-TR')) {
+      lines.shift();
+      text = lines.join('\n').trim();
+    }
+  }
+
+  // Ürün satırlarını biraz okunur hale getir (pipe → satır)
+  if (source.metadata?.type === 'product' && text.includes(' | ')) {
+    text = text
+      .split(' | ')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  // Uçtaki --- ayırıcıları kaldır
+  text = text.replace(/(?:\n\s*---\s*)+$/g, '').trim();
+
+  return text;
+}
+
 function SourceTypeIcon({ type }: { type?: string }) {
   const className = 'w-3.5 h-3.5';
   if (type === 'product') return <Package className={className} />;
@@ -75,6 +105,7 @@ function SourceCard({ source }: { source: DocumentSource }) {
       : null;
   const similarityPct =
     typeof source.similarity === 'number' ? Math.round(source.similarity * 100) : null;
+  const displayContent = getDisplayContent(source, title);
 
   return (
     <div className="rounded-xl border border-neutral-200 bg-white overflow-hidden">
@@ -111,11 +142,14 @@ function SourceCard({ source }: { source: DocumentSource }) {
         </div>
       </button>
       {expanded && (
-        <div className="px-3 pb-3 pt-1 border-t border-neutral-100">
-          <p className="mb-1.5 text-[10px] font-mono text-neutral-400">{fileLabel}</p>
-          <p className="text-xs text-neutral-600 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
-            {source.content}
-          </p>
+        <div className="px-3 pb-3 pt-2 border-t border-neutral-100">
+          <div className="text-xs text-neutral-600 leading-relaxed max-h-56 overflow-y-auto prose-sm [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-xs [&_h1]:font-semibold [&_h2]:font-semibold [&_h3]:font-semibold [&_h1]:text-neutral-800 [&_h2]:text-neutral-800 [&_h3]:text-neutral-700 [&_p]:text-neutral-600 [&_strong]:text-neutral-800">
+            {displayContent ? (
+              <MarkdownContent content={displayContent} />
+            ) : (
+              <p className="text-neutral-400 italic">Bu kaynakta ek metin yok.</p>
+            )}
+          </div>
         </div>
       )}
     </div>

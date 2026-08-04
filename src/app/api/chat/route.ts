@@ -35,7 +35,21 @@ interface MatchedDocument {
   };
 }
 
-const MAX_CITATION_SOURCES = 5;
+const MAX_CITATION_SOURCES = 3;
+
+/** İçindekiler / kapak gibi düşük değerli politika chunk'larını kaynak listesinden çıkar. */
+function isLowValuePolicyChunk(doc: MatchedDocument): boolean {
+  if (doc.metadata?.type !== 'policy') return false;
+  const heading = doc.content.match(/^#{1,3}\s*(.+)$/m)?.[1]?.trim() ?? '';
+  const head = heading.toLocaleLowerCase('tr-TR');
+  const bodyStart = doc.content.trim().slice(0, 120).toLocaleLowerCase('tr-TR');
+  return (
+    /^içindekiler$/.test(head) ||
+    head.includes('içindekiler') ||
+    bodyStart.startsWith('# ores') ||
+    /^#+\s*içindekiler/m.test(doc.content.toLocaleLowerCase('tr-TR'))
+  );
+}
 
 /**
  * Yanıtta kullanılan ürün/politika kayıtlarını UI "Kaynaklar" paneli için hazırlar.
@@ -67,14 +81,16 @@ function buildCitationSources(
   }
 
   // Politika / karışık: önce policy, boşsa ürünler, yoksa tüm bağlam
-  const policies = documents.filter((doc) => doc.metadata?.type === 'policy');
+  const policies = documents.filter(
+    (doc) => doc.metadata?.type === 'policy' && !isLowValuePolicyChunk(doc)
+  );
   const products = documents.filter((doc) => doc.metadata?.type === 'product');
   const pool =
     policies.length > 0
       ? [...bySimilarity(policies), ...bySimilarity(products)]
       : products.length > 0
         ? bySimilarity(products)
-        : bySimilarity(documents);
+        : bySimilarity(documents.filter((doc) => !isLowValuePolicyChunk(doc)));
 
   return dedupe(pool).slice(0, MAX_CITATION_SOURCES);
 }
