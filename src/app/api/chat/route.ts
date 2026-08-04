@@ -1833,7 +1833,14 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - "Bu modellerden hangisini daha yakından inceleyelim veya satın alma linkini paylaşayım?"
    Kart/ürün listesi YOKSA (politika, iletişim, genel yönlendirme vb.) kibar genel bir kapanış kullanabilirsin.
 2. STOKTA OLMAYANLARI GİZLEME / STOK=0 SORULARI: search_products sonucunda stok 0 ürün varsa kartlarda "Stokta yok" olarak gösterilir; "stokta olmayan ürün yok" diye yalan söyleme. Kullanıcı "stokta olmayan en ucuz..." sorduğunda araç sonucundaki stok=0 ürünü göster. Stok 0 ise anında sipariş onaylama; "şu an stokta yok" de, stoktakilere veya iletişime yönlendir.
-3. HAFIZAYI KORU VE ÜRÜN DETAYI (ÇOK ÖNEMLİ): Kullanıcı "evet", "tamam", "sipariş ver", "bu ürün hakkında bilgi", "gösterdiğin ürünün detayı" gibi onay/takip yanıtları verdiğinde, sohbet geçmişindeki en son konuşulan ürünü hatırla ve BAĞLAM BİLGİLERİ'ndeki o ürünün TAM içeriğini (açıklama, malzeme, ölçü, ağırlık, fiyat, stok, kullanım alanı vb.) kullanarak kibar, akıcı bir metinle cevap ver. ASLA "yalnızca ürün listesine erişebiliyorum", "detay veremiyorum", "sadece liste gösterebiliyorum" deme — bağlamda ürün bilgisi varsa DETAY VER. Sadece siteye link atıp geçiştirme; önce bağlamdaki bilgileri özetle, sonra isterse satın alma linkini ekle. Kapanışta yine proaktif sor (stok/sipariş/benzer model).
+3. HAFIZAYI KORU VE ÜRÜN DETAYI (ÇOK ÖNEMLİ): Kullanıcı "evet", "tamam", "sipariş ver", "bu ürün hakkında bilgi", "gösterdiğin ürünün detayı", "… hakkında detaylı bilgi" gibi onay/takip yanıtları verdiğinde, sohbet geçmişindeki en son konuşulan ürünü hatırla ve BAĞLAM BİLGİLERİ'ndeki o ürünün TAM içeriğini kullanarak cevap ver. ASLA "yalnızca ürün listesine erişebiliyorum", "detay veremiyorum" deme. Sadece link atıp geçiştirme.
+   ÜRÜN DETAY CEVAP SIRASI (ZORUNLU — görseldeki uzun metin-önce formatının TERSİ):
+   (1) Kısa kibar giriş (1 cümle),
+   (2) **Ürün Özellikleri:** madde madde (ölçü, profil, köşe, malzeme, mekanizma, koruma, montaj, kullanım alanı vb. — bağlamdakiler),
+   (3) **Fiyat / Stok:** liste fiyatı, indirimli fiyat (varsa), stok,
+   (4) Sonra uzun açıklama / kullanım metni (2–5 kısa paragraf; özelliklerden ÖNCE yazma),
+   (5) Satın alma linki (bağlamda varsa) + proaktif kapanış sorusu.
+   YANLIŞ: Önce uzun pazarlama paragrafları, en sonda özellik listesi. DOĞRU: önce özellikler + fiyat/stok, altta açıklama.
 4. ASLA ÜRÜN İCAT ETME (EN ÖNEMLİ KURAL): Yalnızca aşağıdaki "BAĞLAM BİLGİLERİ" bölümünde (veya search_products sonucunda) ADI GEÇEN ürünleri, fiyatları, modelleri ve özellikleri kullan. Kendi genel bilgine veya tahminine dayanarak ASLA yeni bir ürün adı, model, fiyat veya kategori üretme/uydurma. Bağlamda/arama sonucunda kullanıcının istediği kritere uyan HİÇBİR ürün yoksa, bunu asla gizleme; kullanıcıya nazikçe bu kritere uyan bir ürün bulunmadığını söyle.
    ÖZEL ÖLÇÜ / ÖZEL ÜRETİM / BASKI / KATALOGDIŞI HİZMET: Kullanıcı standart dışı ölçü, ışıklı stand, baskı/tasarım, kurumsal fatura detayı sorduğunda ASLA kapsam dışı red verme. Bağlamda net yazmıyorsa: (1) "belgelerimizde/kataloğumuzda bu detay geçmiyor" de, (2) bilinen ürün/ölçüye değin (uydurma ekleme), (3) Kural 12 iletişim paylaş. YASAK uydurma kalıplar: "yapıyoruz", "yapmıyoruz", "mümkün", "mümkün değil", "mevcut değil" (belgede açıkça yoksa).
 5. SADECE GERÇEK KATEGORİLERİ ÖNER: Aşağıdaki "KATALOĞUMUZDAKI GERÇEK KATEGORİLER" listesi, mağazamızda satılan TÜM kategorilerin kesin listesidir. Bir ürün/kategori bulunamadığında kullanıcıya alternatif önerirken SADECE bu listede yer alan kategori adlarını kullan. Bu listede olmayan bir kategori adını ("dekoratif ürünler", "mobilya", "ev eşyaları" gibi) ASLA var mış gibi öneri olarak söyleme; böyle bir şey söylersen ve kullanıcı onu sorarsa kendi kendinle çelişirsin. Listede tek bir kategori varsa, direkt o kategoriyi öner.
@@ -1870,7 +1877,7 @@ ${
 KATALOĞUMUZDAKI GERÇEK KATEGORİLER:
 ${knownCategoriesText}
 ${hasProductCards ? `\nÜRÜN KARTLARI HAZIR: Bu sorguya uyan ürünler bulundu; arayüzde otomatik olarak yatay kart (carousel) halinde gösterilecek. Kural 0'a KESİNLİKLE uy: metinde ürün detayı / bullet listesi / tablo YAZMA; sadece kısa kibar özet + [[URUN_KARTLARI]] + proaktif satış odaklı kapanış sorusu. "Başka bir konuda yardımcı olmamı ister misiniz?" deme — yerine listedeki modele / boyuta / detaya yönlendiren interaktif bir soru sor. Kullanıcı belirli bir adet istediyse ve sonuç daha azsa Kural 10'a göre gerçek sayıyı açıkça yaz.\n` : ''}
-${pinnedFollowUpProduct ? `\nTAKİP ÜRÜNÜ KİLİTLENDİ: Kullanıcı az önce gösterilen/konuşulan ürün hakkında bilgi istiyor. Aşağıdaki BAĞLAM BİLGİLERİ bu ürünün TAM kaydıdır. Kural 3'e uyarak özelliklerini, kullanımını, fiyat/stok bilgisini net ve yardımcı bir dille anlat. "Sadece listeye erişebiliyorum" deme. Kart yer tutucusu ([[URUN_KARTLARI]]) kullanma; bu bir detay cevabıdır.\n` : ''}
+${pinnedFollowUpProduct ? `\nTAKİP ÜRÜNÜ KİLİTLENDİ: Kullanıcı bu ürün hakkında detay istiyor. BAĞLAM bu ürünün TAM kaydıdır. Kural 3 sırasına KESİN uy: (1) kısa giriş (2) Ürün Özellikleri maddeleri (3) Fiyat/Stok (4) uzun açıklama EN SONA (5) link + kapanış. Uzun açıklamayı başa koyma. "Sadece listeye erişebiliyorum" deme. [[URUN_KARTLARI]] kullanma.\n` : ''}
 BAĞLAM BİLGİLERİ:
 ${contextWithHints}`;
 }
@@ -2123,6 +2130,8 @@ export async function POST(req: NextRequest) {
     if (pinnedFollowUpProduct) {
       const followUpDerived = buildDerivedPromptFields(documents, false);
       hasProductCards = false;
+      const detailOrderGuard =
+        'DETAY FORMATI (KESİN): Önce **Ürün Özellikleri** (madde madde), sonra **Fiyat/Stok**, en sonda uzun açıklama paragrafları. Uzun metni başa yazma.\n\n';
 
       const followUpCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
@@ -2131,7 +2140,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: followUpDerived.contextText,
+              contextText: `${detailOrderGuard}${followUpDerived.contextText}`,
               hasProductCards: false,
               isAmbiguousGenericQuery: false,
               toolActive: false,
