@@ -175,6 +175,21 @@ const CASES = [
     mustNotInclude: [/evet[,.].{0,80}5310|5310 TL.{0,40}altında|uygun/i],
     maxProductSources: 0,
   },
+  {
+    name: 'Başka kategori kabul: 900 altı çerçeve (panosu pin yok)',
+    history: [
+      { role: 'user', content: 'başka ürün bakıcam 900 tl altında' },
+      {
+        role: 'assistant',
+        content:
+          'Hayır, "Kaldırım Panosu" kategorisinde 900 TL ve altında ürün bulunmamaktadır. Daha yüksek bir bütçe veya başka bir kategori (ör. afiş çerçevesi) denemek ister misiniz?',
+      },
+    ],
+    q: 'evet başka kategoride olsun o zaman',
+    mustInclude: [/afiş|çerçeve/i, /\[\[URUN_KARTLARI\]\]/i],
+    mustNotInclude: [/poster\s*swing|5310|kaldırım\s*reklam/i],
+    minProductSources: 3,
+  },
 ];
 
 const email = `eval-prod-${Date.now()}@wed1ng.shop`;

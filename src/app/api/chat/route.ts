@@ -452,6 +452,56 @@ function inferCategoryFromHistory(
   return findMentionedCategories(blob, knownCategories)[0] ?? null;
 }
 
+/** "evet başka kategoride olsun" — ürün pin'i değil, kategori pivotu */
+function looksLikeAcceptAlternateCategory(message: string): boolean {
+  const t = message.toLocaleLowerCase('tr-TR');
+  if (/(başka|diğer|farklı)\s+(bir\s+)?kategori/i.test(t)) return true;
+  if (/kategoride\s+(olsun|bakar|bakayım|olur|ister)/i.test(t)) return true;
+  if (
+    /^(evet|tamam|olur)\b/i.test(t.trim()) &&
+    /(başka|diğer).{0,24}(kategori|ürün)/i.test(t) &&
+    !/(bu\s+ürün|bunun|bilgi\s*almak|incelemek\s*ister)/i.test(t)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Son kullanıcı mesajlarından bütçe (max_price) taşı */
+function inferMaxPriceFromHistory(history: HistoryTurn[]): number | null {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i].role !== 'user') continue;
+    const price = extractSearchFiltersFromMessage(history[i].content).max_price;
+    if (typeof price === 'number' && price > 0) return price;
+  }
+  return null;
+}
+
+/**
+ * Asistanın önerdiği alternatif kategori ("ör. afiş çerçevesi").
+ * Yoksa bilinen kategorilerden, kullanıcıyı sıkıştıran kategorinin dışındakini seç.
+ */
+function inferSuggestedAlternateCategory(
+  history: HistoryTurn[],
+  knownCategories: string[]
+): string | null {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i].role !== 'assistant') continue;
+    const content = history[i].content;
+    const orMatch = content.match(/(?:ör\.|örneğin|mesela)\s*([^).,\n]+)/i);
+    if (orMatch?.[1]) {
+      const fromHint = findMentionedCategories(orMatch[1], knownCategories)[0];
+      if (fromHint) return fromHint;
+    }
+    const cats = findMentionedCategories(content, knownCategories);
+    const frame = cats.find((c) => /çerçeve/i.test(c));
+    if (frame && cats.some((c) => /pano/i.test(c))) return frame;
+  }
+
+  const stuck = inferCategoryFromHistory(history, '', knownCategories);
+  return knownCategories.find((c) => c !== stuck) ?? knownCategories[0] ?? null;
+}
+
 /**
  * Kullanıcı mesajından deterministik arama filtrelerini çıkarır.
  * Direct category browse yolunda tool çağrısı atlandığı için burada
@@ -817,6 +867,9 @@ function looksLikeProductFollowUp(message: string): boolean {
   const wordCount = normalized.split(/\s+/).filter(Boolean).length;
   if (!normalized) return false;
 
+  // "evet başka kategoride olsun" → pin değil; alternatif kategori araması
+  if (looksLikeAcceptAlternateCategory(message)) return false;
+
   // Katalog/liste aramaları takip sorusu değildir ("indirimli ürünler hangileri").
   // Dikkat: "gösterdiğin ürün" gibi takip ifadelerinde "göster" alt dizisi
   // geçer; bu yüzden kelime sınırı / tam ifade kullanıyoruz.
@@ -829,6 +882,7 @@ function looksLikeProductFollowUp(message: string): boolean {
     /\blistesi\b/,
     /\bgöster\b/,
     /\bkategori\b/,
+    /kategoride/,
   ];
   if (catalogListPatterns.some((pattern) => pattern.test(normalized))) return false;
 
@@ -2254,8 +2308,80 @@ export async function POST(req: NextRequest) {
     const directCategoryMatches = isLikelyDirectCategoryBrowse(message, knownCategories);
     const messageFilters = extractSearchFiltersFromMessage(message);
 
-    // "Tüm ürünleri göster" — kategori yok; tüm katalog kartlarla
-    if (wantsAllCatalogProducts(message)) {
+    // "evet başka kategoride olsun" — pin'i kır; önerilen kategori + geçmiş bütçe
+    if (looksLikeAcceptAlternateCategory(message) && cleanHistory.length > 0) {
+      const altCategory =
+        findMentionedCategories(message, knownCategories)[0] ??
+        inferSuggestedAlternateCategory(cleanHistory, knownCategories);
+      const budget =
+        messageFilters.max_price ?? inferMaxPriceFromHistory(cleanHistory) ?? undefined;
+
+      let altDocs = altCategory
+        ? await executeSearchProducts(supabase, knownCategories, {
+            category: altCategory,
+            ...(budget != null ? { max_price: budget } : {}),
+            sort_by: 'price_asc',
+            limit: 50,
+          })
+        : [];
+      if (budget != null) {
+        altDocs = altDocs.filter((doc) => {
+          const price = doc.metadata?.price;
+          return typeof price === 'number' && price <= budget;
+        });
+      }
+      // Yanlışlıkla önceki panosu sızmasın
+      if (altCategory) {
+        altDocs = altDocs.filter(
+          (doc) =>
+            !doc.metadata?.category ||
+            doc.metadata.category.toLocaleLowerCase('tr-TR') ===
+              altCategory.toLocaleLowerCase('tr-TR')
+        );
+      }
+
+      documents = altDocs;
+      const altDerived = buildDerivedPromptFields(documents, true);
+      hasProductCards = altDerived.hasProductCards;
+      const budgetBit =
+        budget != null ? ` ve ${budget} TL altı/eşit` : '';
+      const altGuard =
+        documents.length === 0
+          ? `ALTERNATİF KATEGORİ (KESİN): "${altCategory ?? 'alternatif'}"${budgetBit} ürün YOK. Önceki kaldırım panosu / 5310 TL ürünü GÖSTERME.\n\n`
+          : `ALTERNATİF KATEGORİ (KESİN): "${altCategory}"${budgetBit} ${documents.length} ürün. Hepsi kartlarda. Kaldırım panosu / bütçe üstü ürün GÖSTERME.\n\n`;
+
+      const altCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: buildSystemPrompt({
+              knownCategoriesText,
+              contextText: `${altGuard}${altDerived.contextText}`,
+              hasProductCards: altDerived.hasProductCards,
+              isAmbiguousGenericQuery: false,
+              toolActive: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
+            }),
+          },
+          ...historyMessages,
+          { role: 'user', content: message },
+        ],
+        temperature: 0.2,
+      });
+      rawReply = altCompletion.choices[0].message.content ?? '';
+      if (documents.length === 0) {
+        rawReply = `Üzgünüm, "${altCategory ?? 'bu kategori'}"${
+          budget != null ? ` için ${budget} TL altında` : ''
+        } şu an uygun ürün bulamadım. Bütçeyi yükseltmek veya başka bir filtre denemek ister misiniz?`;
+        hasProductCards = false;
+      } else if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
+        rawReply = `"${altCategory}" kategorisinde${
+          budget != null ? ` ${budget} TL altındaki` : ''
+        } ürünlerimizi aşağıda inceleyebilirsiniz:\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nİlgilendiğiniz bir model var mı?`;
+      }
+    } else if (wantsAllCatalogProducts(message)) {
       documents = await executeSearchProducts(supabase, knownCategories, {
         sort_by: 'price_asc',
         limit: 200,
