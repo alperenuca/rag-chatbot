@@ -341,6 +341,25 @@ function findMentionedCategories(message: string, knownCategories: string[]): st
     }
   }
 
+  // Tek kelime alias: "çerçeveyi/çerçeve" → Afiş Çerçevesi (her iki kelime şartı olmasa da)
+  // NOT: JS \b Türkçe harflerde (ç/ş/ı…) kırılır; \p{L} lookbehind kullan.
+  if (matches.length === 0) {
+    const wantsFrame = /(?<!\p{L})çerçeve/iu.test(message);
+    const wantsPano = /(?<!\p{L})(?:pano|kaldırım)/iu.test(message);
+    if (wantsFrame) {
+      const frameCat = knownCategories.find(
+        (c) => /çerçeve/i.test(c) && !isCategoryNegatedInMessage(message, c)
+      );
+      if (frameCat) matches.push(frameCat);
+    }
+    if (wantsPano && !wantsFrame) {
+      const panoCat = knownCategories.find(
+        (c) => /pano/i.test(c) && !isCategoryNegatedInMessage(message, c)
+      );
+      if (panoCat) matches.push(panoCat);
+    }
+  }
+
   return matches.sort((a, b) => b.length - a.length);
 }
 
@@ -479,11 +498,11 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     filters.colors = colors;
   }
 
-  // Profil kalınlığı: "32 mm", "32mm profil"
+  // Profil kalınlığı: "32 mm", "35mm" (katalogda 25/32/35 var; sadece 25/32 ile sınırlama)
   const profileMatch = text.match(/\b(\d{2})\s*mm\b/i);
   if (profileMatch?.[1]) {
     const mm = Number(profileMatch[1]);
-    if (mm === 25 || mm === 32) {
+    if (Number.isFinite(mm) && mm >= 10 && mm <= 80) {
       filters.profile_thickness_mm = mm;
     }
   }
@@ -2475,6 +2494,10 @@ export async function POST(req: NextRequest) {
         documents.length > 1
           ? `ÖNEMLİ: Filtreye uyan ${documents.length} ürün var; "yalnızca 1 ürün" DEME.\n\n`
           : '';
+      const profileHitGuard =
+        messageFilters.profile_thickness_mm != null && documents.length > 0
+          ? `PROFİL SONUCU (KESİN): ${messageFilters.profile_thickness_mm} mm için ${documents.length} ürün BULUNDU. "bulunmamaktadır / yoktur / yok" DEME; ürünü göster, stok 0 ise "(Stokta yok)" yaz.\n\n`
+          : '';
 
       const filterCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
@@ -2483,7 +2506,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: `${multiGuard}${colorCompareGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
+              contextText: `${profileHitGuard}${multiGuard}${colorCompareGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
               hasProductCards: filterDerived.hasProductCards,
               isAmbiguousGenericQuery: filterDerived.isAmbiguousGenericQuery,
               toolActive: true,
@@ -2498,6 +2521,19 @@ export async function POST(req: NextRequest) {
       });
 
       rawReply = filterCompletion.choices[0].message.content ?? '';
+      // Profil filtresi sonuç verdiyse modelin "yok" demesini düzelt
+      if (
+        messageFilters.profile_thickness_mm != null &&
+        documents.length > 0 &&
+        /(bulunmamaktadır|bulunmuyor|yoktur|ürün yok|profil.*yok)/i.test(rawReply)
+      ) {
+        const mm = messageFilters.profile_thickness_mm;
+        const summary = buildProductPriceStockSummary(documents, 5)
+          .replace(/^FİYAT\/STOK ÖZETİ[^\n]*\n/, '')
+          .trim();
+        rawReply =
+          `Evet, ${mm} mm profilli ürünümüz var${documents.some((d) => d.metadata?.stock === 0) ? ' (stok durumu aşağıda)' : ''}:\n\n${summary}\n\n${PRODUCT_CARDS_PLACEHOLDER}`.trim();
+      }
       // Model tek renge kayarsa / talimat sızdırırsa temiz karşılaştırma özetini ekle
       if (colorCompareGuard && (messageFilters.colors?.length ?? 0) > 1) {
         const leakedInstruction =
