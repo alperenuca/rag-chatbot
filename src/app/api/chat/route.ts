@@ -559,6 +559,37 @@ function inferSuggestedAlternateCategory(
   return knownCategories.find((c) => c !== stuck) ?? knownCategories[0] ?? null;
 }
 
+/** "her çerçevenin profili 25 mm mi?" — tek ürüne/filtreye kilitleme */
+function looksLikeUniversalProfileQuestion(message: string): boolean {
+  const t = message.toLocaleLowerCase('tr-TR');
+  if (!/(profil|kalınl[ıi]k|\d+\s*mm)/i.test(t)) return false;
+  return /(her\s+çerçeve|her\s+ürün|hepsi|hepsinin|hepsinde|tüm\s+çerçeve|tümünün|bütün\s+çerçeve|hepsi\s+\d+\s*mm)/i.test(
+    t
+  );
+}
+
+function extractClaimedProfileMm(message: string): number | null {
+  const match = message.match(/\b(\d{2})\s*mm\b/i);
+  if (!match?.[1]) return null;
+  const mm = Number(match[1]);
+  return Number.isFinite(mm) && mm >= 10 && mm <= 80 ? mm : null;
+}
+
+function collectProfileThicknessesMm(docs: MatchedDocument[]): number[] {
+  const set = new Set<number>();
+  for (const doc of docs) {
+    const raw = doc.metadata?.profile_thickness_mm;
+    const mm =
+      typeof raw === 'number'
+        ? raw
+        : typeof raw === 'string' && raw.trim() && !Number.isNaN(Number(raw))
+          ? Number(raw)
+          : NaN;
+    if (Number.isFinite(mm)) set.add(mm);
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
 /** "5311 TL elimde var, bu ürünü alabilir miyim?" — katalog bütçe filtresi değil */
 function looksLikeAffordabilityQuestion(message: string): boolean {
   const t = message.toLocaleLowerCase('tr-TR');
@@ -735,12 +766,15 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     filters.colors = colors;
   }
 
-  // Profil kalınlığı: "32 mm", "35mm" (katalogda 25/32/35 var; sadece 25/32 ile sınırlama)
-  const profileMatch = text.match(/\b(\d{2})\s*mm\b/i);
-  if (profileMatch?.[1]) {
-    const mm = Number(profileMatch[1]);
-    if (Number.isFinite(mm) && mm >= 10 && mm <= 80) {
-      filters.profile_thickness_mm = mm;
+  // Profil kalınlığı: "32 mm", "35mm" — AMA "her çerçeve 25 mm mi?" evrensel soru;
+  // yalnızca 25 mm'ye filtreleyip "hepsi 25" demeyi engelle.
+  if (!looksLikeUniversalProfileQuestion(message)) {
+    const profileMatch = text.match(/\b(\d{2})\s*mm\b/i);
+    if (profileMatch?.[1]) {
+      const mm = Number(profileMatch[1]);
+      if (Number.isFinite(mm) && mm >= 10 && mm <= 80) {
+        filters.profile_thickness_mm = mm;
+      }
     }
   }
 
@@ -1002,6 +1036,8 @@ function looksLikeProductFollowUp(message: string): boolean {
 
   // "evet başka kategoride olsun" → pin değil; alternatif kategori araması
   if (looksLikeAcceptAlternateCategory(message)) return false;
+  // "her çerçeve 25 mm mi?" → tek ürün pin'i değil
+  if (looksLikeUniversalProfileQuestion(message)) return false;
 
   // Katalog/liste aramaları takip sorusu değildir ("indirimli ürünler hangileri").
   // Dikkat: "gösterdiğin ürün" gibi takip ifadelerinde "göster" alt dizisi
@@ -2470,8 +2506,43 @@ export async function POST(req: NextRequest) {
     const directCategoryMatches = isLikelyDirectCategoryBrowse(message, knownCategories);
     const messageFilters = extractSearchFiltersFromMessage(message);
 
-    // "evet" / "evet başka kategoride" — pin'i kır; önerilen kategori + geçmiş bütçe
-    if (acceptAlternateCategory) {
+    // "her çerçevenin profili 25 mm mi?" — katalogdaki TÜM profilleri say; 25'e filtreleme
+    if (looksLikeUniversalProfileQuestion(message)) {
+      const scopeCategory =
+        findMentionedCategories(message, knownCategories)[0] ??
+        inferUserCommittedCategoryFromHistory(
+          cleanHistory,
+          message,
+          knownCategories
+        ) ??
+        knownCategories.find((c) => /çerçeve/i.test(c)) ??
+        null;
+      const surveyDocs = await executeSearchProducts(supabase, knownCategories, {
+        ...(scopeCategory ? { category: scopeCategory } : {}),
+        limit: 200,
+      });
+      const profiles = collectProfileThicknessesMm(surveyDocs);
+      const claimed = extractClaimedProfileMm(message);
+      const scopeLabel = scopeCategory
+        ? `"${scopeCategory}" kategorisinde`
+        : 'katalogda';
+      const listBit =
+        profiles.length > 0
+          ? profiles.map((mm) => `${mm} mm`).join(', ')
+          : 'bilinmiyor';
+
+      documents = [];
+      hasProductCards = false;
+      if (claimed != null && profiles.length === 1 && profiles[0] === claimed) {
+        rawReply = `Evet — ${scopeLabel} ürünlerin profil kalınlığı ${claimed} mm.`;
+      } else if (claimed != null && profiles.includes(claimed) && profiles.length > 1) {
+        rawReply = `Hayır — ${scopeLabel} yalnızca ${claimed} mm değil. Mevcut profil kalınlıkları: ${listBit}. İsterseniz ${profiles.filter((p) => p !== claimed).map((p) => `${p} mm`).join(' veya ')} modelleri de gösterebilirim.`;
+      } else if (claimed != null && !profiles.includes(claimed)) {
+        rawReply = `Hayır — ${scopeLabel} ${claimed} mm profil bulunmuyor. Mevcut profiller: ${listBit}.`;
+      } else {
+        rawReply = `${scopeLabel} mevcut profil kalınlıkları: ${listBit}.`;
+      }
+    } else if (acceptAlternateCategory) {
       const altCategory =
         findMentionedCategories(message, knownCategories)[0] ??
         inferSuggestedAlternateCategory(cleanHistory, knownCategories);

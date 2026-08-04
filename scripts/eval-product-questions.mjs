@@ -245,6 +245,12 @@ const CASES = [
     mustInclude: [/evet/i, /5310/],
     mustNotInclude: [/hayır/i, /kabul edilmez|alamazsınız|imkânı yoktur/i],
   },
+  {
+    name: 'Her çerçeve 25 mm mi? → Hayır (32 de var)',
+    q: 'o zaman her çerçevenin profili 25 mm mi',
+    mustInclude: [/hayır/i, /32/],
+    mustNotInclude: [/hepsinin profil kalınlığı 25|hepsinin.*25 mm'dir|hepsi.*25 mm/i],
+  },
 ];
 
 const email = `eval-prod-${Date.now()}@wed1ng.shop`;
