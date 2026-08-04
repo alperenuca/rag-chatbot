@@ -568,7 +568,10 @@ function buildMultiColorCompareGuard(
 ): string {
   if (colors.length < 2) return '';
   const products = docs.filter((doc) => doc.metadata?.type === 'product');
-  const lines = ['RENK KARŞILAŞTIRMASI (KESİN — her iki rengi de kullan, "bilmiyorum" DEME):'];
+  const lines = [
+    'RENK KARŞILAŞTIRMASI (KESİN): Her rengi ayrı yaz. Olmayan renk için ürün UYDURMA; "katalogda bu ölçü+renk yok" de.',
+  ];
+  let foundPrices = 0;
 
   for (const color of colors) {
     const needle = color.toLocaleLowerCase('tr-TR');
@@ -577,13 +580,14 @@ function buildMultiColorCompareGuard(
       return typeof raw === 'string' && raw.toLocaleLowerCase('tr-TR').includes(needle);
     });
     if (!match) {
-      lines.push(`- ${color}: bu filtreyle ürün bulunamadı (uydurma).`);
+      lines.push(`- ${color}: katalogda bu filtreyle (ölçü+renk) ürün YOK.`);
       continue;
     }
     const title =
       typeof match.metadata?.title === 'string' ? match.metadata.title : 'Ürün';
     const price = match.metadata?.price;
     const stock = match.metadata?.stock;
+    if (typeof price === 'number') foundPrices += 1;
     lines.push(
       `- ${color}: ${title} — ${typeof price === 'number' ? `${price} TL` : 'fiyat yok'}, stok ${
         typeof stock === 'number' ? stock : '?'
@@ -591,10 +595,29 @@ function buildMultiColorCompareGuard(
     );
   }
 
-  lines.push(
-    'Fiyat farkını sayısal hesapla (büyük − küçük); hangisinin daha ucuz olduğunu açıkça söyle.'
-  );
+  if (foundPrices >= 2) {
+    lines.push(
+      'Fiyat farkını sayısal hesapla (büyük − küçük); hangisinin daha ucuz olduğunu açıkça söyle.'
+    );
+  } else {
+    lines.push(
+      'Her iki renkte de fiyat yoksa fark hesaplama; var olanı söyle, olmayanı "katalogda yok" de.'
+    );
+  }
   return `${lines.join('\n')}\n\n`;
+}
+
+/** Modele giden renk karşılaştırma metninden kullanıcıya sızdırılabilir satırları ayıkla. */
+function publicMultiColorCompareSummary(guardText: string): string {
+  return guardText
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line.startsWith('- ') &&
+        !/UYDURMA|sayısal hesapla|bilmiyorum DEME|KESİN/i.test(line)
+    )
+    .join('\n');
 }
 
 /** Arama sonuçlarından kısa fiyat/stok özeti (modele + gerekirse yanıta). */
@@ -910,6 +933,23 @@ function extractExplicitCartAmountTl(message: string): number | null {
 }
 
 /**
+ * "Sepetim 749 TL, 1 TL daha eklesem" → varsayımsal yeni toplam (750).
+ */
+function extractHypotheticalCartAfterAddTl(message: string): number | null {
+  const text = message.toLocaleLowerCase('tr-TR');
+  const addMatch = text.match(
+    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira)?\s*daha\s*(?:ekle|eklersem|eklesem|ekleyince|eklersem)/i
+  );
+  if (!addMatch?.[1]) return null;
+  const add = Number(addMatch[1].replace(',', '.'));
+  if (!Number.isFinite(add) || add <= 0 || add > 5000) return null;
+
+  const base = extractExplicitCartAmountTl(message);
+  if (base == null) return null;
+  return Math.round((base + add) * 100) / 100;
+}
+
+/**
  * Kısmi iade sonrası "ücretsiz kargo iade tutarından kesilsin mi?" tuzağı.
  * Sipariş anı eşiği (750) ile karıştırılmamalı; kesilir/kesilmez uydurulmamalı.
  */
@@ -972,9 +1012,15 @@ function shippingThresholdHint(message: string): string {
     return '';
   }
 
+  const afterAdd = extractHypotheticalCartAfterAddTl(message);
   const amount = extractExplicitCartAmountTl(message);
   let comparison = '';
-  if (amount != null) {
+  if (afterAdd != null && amount != null) {
+    const free = afterAdd >= FREE_SHIPPING_THRESHOLD_TL;
+    comparison = free
+      ? `HİPOTETİK SEPET: Şu an ${amount} TL; belirtilen ekleme sonrası ${afterAdd} TL ≥ ${FREE_SHIPPING_THRESHOLD_TL} → o zaman kargo ÜCRETSİZ. "Şu an ücretsiz değil; X TL ekleyince evet" diye cevapla. Sadece mevcut ${amount} TL'ye bakıp "Hayır" deyip bırakma.`
+      : `HİPOTETİK SEPET: Şu an ${amount} TL; ekleme sonrası ${afterAdd} TL hâlâ < ${FREE_SHIPPING_THRESHOLD_TL} → kargo ücretsiz OLMAZ.`;
+  } else if (amount != null) {
     comparison =
       amount >= FREE_SHIPPING_THRESHOLD_TL
         ? `Kullanıcının tutarı ${amount} TL ≥ ${FREE_SHIPPING_THRESHOLD_TL} → kargo ÜCRETSİZ. Cevaba "Evet" ile başla; sonra kuralı açıkla.`
@@ -1184,6 +1230,16 @@ function returnPolicyHint(message: string): string {
   if (/(indirim|kampanya)/i.test(text)) {
     lines.push(
       'BU SORU İNDİRİMLİ ÜRÜN İADESİ: Cevaba "Hayır" ile başla. İndirimdeki ürün iade edilemez. "14 gün içinde iade edebilirsiniz" DEME — bu genel kural indirimli ürüne uygulanmaz.'
+    );
+  }
+
+  if (
+    /(duvara as|asmış|astım|astim|montaj|kullandım|kullandim|kullanılmış|kullanilmis|açtım ambalaj|actim ambalaj|beğenmedim|begenmedim)/i.test(
+      text
+    )
+  ) {
+    lines.push(
+      'KULLANILMIŞ / MONTAJLI ÜRÜN: İade için ürün kullanılmamış, etiketli ve orijinal ambalajında olmalı. Duvara asılmış / kullanılmış ürün bu koşulları bozmuş olabilir — "evet iade edebilirsiniz" diye garanti VERME; koşulları söyle, net durum için iletisim@ores.com.tr + telefon yönlendir.'
     );
   }
 
@@ -2442,27 +2498,36 @@ export async function POST(req: NextRequest) {
       });
 
       rawReply = filterCompletion.choices[0].message.content ?? '';
-      // Model tek renge kayarsa karşılaştırma özetini zorunlu ekle
+      // Model tek renge kayarsa / talimat sızdırırsa temiz karşılaştırma özetini ekle
       if (colorCompareGuard && (messageFilters.colors?.length ?? 0) > 1) {
+        const leakedInstruction =
+          /(uydurma|sayısal hesapla|bu filtreyle ürün bulunamadı \(uydurma\))/i.test(
+            rawReply
+          );
         const prices = documents
           .map((doc) => doc.metadata?.price)
           .filter((price): price is number => typeof price === 'number');
         const hasBothPrices =
           prices.length >= 2 &&
           prices.every((price) => rawReply.includes(String(price)));
-        if (!hasBothPrices) {
-          const compact = colorCompareGuard
-            .replace(/^RENK KARŞILAŞTIRMASI[^\n]*\n/, '')
+        const publicSummary = publicMultiColorCompareSummary(colorCompareGuard);
+        if (leakedInstruction || (!hasBothPrices && publicSummary)) {
+          // İç talimat sızmışsa ham cevabı temiz özetle değiştir/ekle
+          let cleaned = rawReply
+            .replace(/-?\s*siyah:.*?uydurma\)\.?/gi, '')
+            .replace(/Fiyat farkını sayısal hesapla[^\n]*/gi, '')
+            .replace(/\(uydurma\)/gi, '')
+            .replace(/\n{3,}/g, '\n\n')
             .trim();
-          if (compact) {
-            const nums = prices;
-            let diffLine = '';
-            if (nums.length >= 2) {
-              const hi = Math.max(...nums);
-              const lo = Math.min(...nums);
-              diffLine = `\nFiyat farkı: ${hi - lo} TL; daha ucuz olan ${lo} TL olan modeldir.`;
-            }
-            rawReply = `${rawReply}\n\n${compact}${diffLine}`.trim();
+          const nums = prices;
+          let diffLine = '';
+          if (nums.length >= 2) {
+            const hi = Math.max(...nums);
+            const lo = Math.min(...nums);
+            diffLine = `\nFiyat farkı: ${hi - lo} TL; daha ucuz olan ${lo} TL olan modeldir.`;
+          }
+          if (!hasBothPrices || leakedInstruction) {
+            rawReply = `${cleaned}\n\n${publicSummary}${diffLine}`.trim();
           }
         }
       }
