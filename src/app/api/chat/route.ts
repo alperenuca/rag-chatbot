@@ -89,6 +89,7 @@ const POLICY_KEYWORDS = [
   'adres', 'yanlis adres', 'yanlış adres', 'ikinci kargo',
   'dava', 'toplu dava', 'avukat', 'mahkeme', 'ihtilaf', 'uyuşmazlık',
   'almanya', 'avrupa', 'ab cayma', 'yurt dışı', 'yurtdışı',
+  'çocuk', 'cocuk', 'ebeveyn', 'veli', 'kişisel veri', 'kvkk', 'veri sil',
   'iletisim', 'iletişim', 'sikayet', 'şikayet', 'sozlesme', 'sözleşme',
   'tahkim', 'sms', 'politika', 'hasarli', 'hasarlı', 'kusurlu', 'yasal',
 ];
@@ -822,6 +823,31 @@ function internationalReturnHint(message: string): string {
 }
 
 /**
+ * Çocuk verileri / ebeveyn silme talebi (Gizlilik §6.8).
+ */
+function childDataHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  const childOrParent =
+    /(çocuk|cocuk|oğul|oglu|kızım|kizim|ebeveyn|veli|vasi|yaşındaki|yasindaki|15\s*yaş|16\s*yaş|reşit değil|resit degil)/i.test(
+      text
+    );
+  const dataOrDelete =
+    /(kişisel veri|kisisel veri|veri|hesap|silin|silme|kvkk|gizlilik|bilgilerin)/i.test(
+      text
+    );
+  if (!childOrParent || !dataOrDelete) return '';
+
+  return [
+    'ÇOCUK VERİLERİ / EBEVEYN SİLME (KESİN — §6.8): Sadece "mail atın" deme. Politikayı özetle:',
+    '1) Hizmetler çocuklar tarafından kullanılması için amaçlanmamıştır; çocuklar hakkında bilerek kişisel bilgi toplanmaz.',
+    '2) Bilgilerini paylaşmış bir çocuğun ebeveyni veya vasisi, bu bilgilerin silinmesini talep etmek için ORES ile iletişime geçebilir — talebi geçerli kabul et, reddetme.',
+    '3) Politika notu: yürürlük tarihi itibarıyla 16 yaşın altındaki bireylerin kişisel bilgilerinin paylaşıldığına veya satıldığına dair bir bilgi bulunmamaktadır (kısaca belirt).',
+    '4) Silme/hak kullanımı için: iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00). Talebe yanıt öncesi kimlik/hesap doğrulaması istenebilir — uydurma ek prosedür ekleme.',
+    'Anında silindi / chat üzerinden sildik diye vaat etme; kanalı ve politika özetini ver.',
+  ].join('\n');
+}
+
+/**
  * Toplu dava / tahkim / avukat tehdidi: şartları doğru ve ölçülü aktar.
  */
 function disputeLegalHint(message: string): string {
@@ -936,6 +962,7 @@ function withPolicyHints(message: string, contextText: string): string {
     damagedProductHint(message),
     wrongAddressHint(message),
     internationalReturnHint(message),
+    childDataHint(message),
     disputeLegalHint(message),
     returnPolicyHint(message),
     urgentSupportHint(message),
@@ -1227,7 +1254,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; TR iade 14 gün; ödeme kart/iyzico/havale; kapıda nakit yok; hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse; tanıdıkla götürmek için "Evet AB caymanız var" deme. DAVA/TAHKİM: ölçülü dil + iletişim. Uydurma yok; Kural 12.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma, çocuk verisi/ebeveyn silme soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; TR iade 14 gün; ödeme kart/iyzico/havale; kapıda nakit yok; hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse. ÇOCUK VERİSİ: hizmet çocuklara yönelik değil; ebeveyn/vasi silme talep edebilir — sadece "mail atın" deme, §6.8 + e-posta/telefon ver. DAVA/TAHKİM: ölçülü dil + iletişim. Uydurma yok; Kural 12.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
 ${
   toolActive
