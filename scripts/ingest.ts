@@ -113,7 +113,8 @@ async function processProducts() {
             ? `Liste Fiyatı: ${listPrice} TL | İndirimli Fiyat: ${discountedPrice} TL (İndirimde)`
             : `Fiyat: ${effectivePrice ?? 'Belirtilmemiş'} TL (İndirim yok)`;
 
-          const content = `Ürün Adı: ${row.urun_adi} | Kategori: ${row.kategori} | Malzeme: ${row.malzeme} | Renk: ${row.renk} | Boyut/Ölçü: ${dimension} | Ağırlık: ${
+          const profileMm = row.profil_kalinligi_mm?.trim() || 'Belirtilmemiş';
+          const content = `Ürün Adı: ${row.urun_adi} | Kategori: ${row.kategori} | Malzeme: ${row.malzeme} | Renk: ${row.renk} | Boyut/Ölçü: ${dimension} | Profil Kalınlığı: ${profileMm} mm | Köşe Tipi: ${row.kose_tipi || 'Belirtilmemiş'} | Ağırlık: ${
             weight ?? 'Belirtilmemiş'
           } kg | ${priceLine} | Stok: ${row.stok_adedi} | Açıklama: ${row.aciklama}`;
 

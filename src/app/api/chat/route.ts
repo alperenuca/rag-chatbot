@@ -845,7 +845,8 @@ function looksLikeProductFollowUp(message: string): boolean {
   const propertyHints = [
     'ağırlık', 'ağırlığı', 'fiyat', 'fiyatı', 'indirimli fiyat', 'stok', 'stokta',
     'ölçü', 'ölçüsü', 'malzeme', 'malzemesi', 'renk', 'rengi', 'link',
-    'kaç kg', 'kaç kilo', 'ne kadar',
+    'profil', 'profili', 'kalınlık', 'kalınlığı', 'köşe', 'köşesi',
+    'kaç kg', 'kaç kilo', 'ne kadar', 'kaç mm',
   ];
   if (wordCount <= 8 && propertyHints.some((keyword) => normalized.includes(keyword))) {
     return true;
@@ -2121,7 +2122,24 @@ export async function POST(req: NextRequest) {
               const listPrice = doc.metadata?.list_price;
               const salePrice = doc.metadata?.price;
               const hasDiscount = doc.metadata?.has_discount === true;
+              const profileRaw = doc.metadata?.profile_thickness_mm;
+              const profileMm =
+                typeof profileRaw === 'number'
+                  ? profileRaw
+                  : typeof profileRaw === 'string' && profileRaw.trim() && !Number.isNaN(Number(profileRaw))
+                    ? Number(profileRaw)
+                    : null;
+              const dimension =
+                typeof doc.metadata?.dimension === 'string' ? doc.metadata.dimension : null;
+              const material =
+                typeof doc.metadata?.material === 'string' ? doc.metadata.material : null;
+              const color =
+                typeof doc.metadata?.color === 'string' ? doc.metadata.color : null;
               const extraLines = [
+                dimension ? `Boyut/Ölçü: ${dimension}` : null,
+                profileMm != null ? `Profil Kalınlığı: ${profileMm} mm` : null,
+                material ? `Malzeme: ${material}` : null,
+                color ? `Renk: ${color}` : null,
                 typeof weightKg === 'number' ? `Ağırlık: ${weightKg} kg` : null,
                 typeof listPrice === 'number' ? `Liste Fiyatı: ${listPrice} TL` : null,
                 typeof salePrice === 'number'
@@ -2166,6 +2184,23 @@ export async function POST(req: NextRequest) {
         /^(evet|tamam|olur)\b/i.test(message.trim());
       const productDocs = documents.filter((doc) => doc.metadata?.type === 'product');
       hasProductCards = wantsCardWithDetail && productDocs.length > 0;
+
+      // "profil kalınlığı ne?" → metadata'da varsa kesin cevap (content'te olmayabilir)
+      let propertyGuard = '';
+      if (/(profil|kalınl[ıi]k|kaç\s*mm)/i.test(message)) {
+        const pinned = productDocs[0];
+        const raw = pinned?.metadata?.profile_thickness_mm;
+        const mm =
+          typeof raw === 'number'
+            ? raw
+            : typeof raw === 'string' && raw.trim() && !Number.isNaN(Number(raw))
+              ? Number(raw)
+              : null;
+        if (mm != null) {
+          propertyGuard = `ÖZELLİK CEVABI (KESİN): Bu ürünün profil kalınlığı ${mm} mm. "Bilgim yok / belirtilmemiş" DEME; cevaba "${mm} mm" yaz.\n\n`;
+        }
+      }
+
       const detailOrderGuard = hasProductCards
         ? `DETAY + KART (KESİN): Kısa giriş, sonra [[URUN_KARTLARI]], ardından Kural 3 sırasıyla özellikler → fiyat/stok → uzun açıklama. "Aşağıda" deyip kart/yer tutucu unutma. Stok 0 olsa bile kartı göster ("Stokta yok").\n\n`
         : 'DETAY FORMATI (KESİN): Önce **Ürün Özellikleri** (madde madde), sonra **Fiyat/Stok**, en sonda uzun açıklama. "Aşağıda inceleyebilirsiniz" deyip boş bırakma — metinde özellikleri yaz. Uzun metni başa yazma.\n\n';
@@ -2177,7 +2212,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: `${detailOrderGuard}${followUpDerived.contextText}`,
+              contextText: `${propertyGuard}${detailOrderGuard}${followUpDerived.contextText}`,
               hasProductCards,
               isAmbiguousGenericQuery: false,
               toolActive: hasProductCards,
@@ -2193,6 +2228,16 @@ export async function POST(req: NextRequest) {
       });
 
       rawReply = followUpCompletion.choices[0].message.content ?? '';
+      if (propertyGuard) {
+        const mmMatch = propertyGuard.match(/profil kalınlığı (\d+(?:\.\d+)?) mm/i);
+        const mm = mmMatch?.[1];
+        if (
+          mm &&
+          !new RegExp(`${mm}\\s*mm`, 'i').test(rawReply)
+        ) {
+          rawReply = `Bu ürünün profil kalınlığı ${mm} mm'dir. Başka bir özellik (ölçü, ağırlık, stok) sormak ister misiniz?`;
+        }
+      }
       if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
         rawReply = `${rawReply}\n\n${PRODUCT_CARDS_PLACEHOLDER}`;
       }
