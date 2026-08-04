@@ -87,6 +87,7 @@ const POLICY_KEYWORDS = [
   'iptal', 'acil', 'telefon', 'mesai', 'değişiklik', 'degisiklik',
   'hasar', 'kirik', 'kırık', 'tutanak', 'yanlis urun', 'yanlış ürün',
   'adres', 'yanlis adres', 'yanlış adres', 'ikinci kargo',
+  'dava', 'toplu dava', 'avukat', 'mahkeme', 'ihtilaf', 'uyuşmazlık',
   'iletisim', 'iletişim', 'sikayet', 'şikayet', 'sozlesme', 'sözleşme',
   'tahkim', 'sms', 'politika', 'hasarli', 'hasarlı', 'kusurlu', 'yasal',
 ];
@@ -798,6 +799,29 @@ function returnPolicyHint(message: string): string {
 }
 
 /**
+ * Toplu dava / tahkim / avukat tehdidi: şartları doğru ve ölçülü aktar.
+ */
+function disputeLegalHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  if (
+    !/(dava|toplu dava|tahkim|avukat|mahkeme|ihtilaf|uyuşmazlık|uyusmazlik|temsili dava|birleşik dava)/i.test(
+      text
+    )
+  ) {
+    return '';
+  }
+
+  return [
+    'UYUŞMAZLIK / TAHKİM (KESİN — ÖLÇÜLÜ DİL): Mahkeme gibi "hakkınız yok" diye hüküm verme. Hizmet şartlarına göre özetle:',
+    '1) Talepler bağlayıcı bireysel tahkim ile çözülür (İstanbul).',
+    '2) Toplu, birleşik veya temsili davalara katılım feragati vardır; talepler bireysel ele alınır.',
+    '3) Her taraf kendi avukatlık ücretinden kendisi sorumludur — "avukat masrafınızı size yükleriz/yükleyemezsiniz" diye kesin mahkeme hükmü verme; şart metnini aktar.',
+    '4) Tahkimden vazgeçme (opt-out): ilk satın almadan itibaren 30 gün içinde yazılı bildirim (adres Kağıthane) mümkün olabilir — kısaca belirt.',
+    'İletişim bilgilerini (iletisim@ores.com.tr, +90 264 531 00 10–11, 08:00–18:00) paylaş. Mümkünse önce ürün/sipariş sorununa yardım teklif et; hukuki danışmanlık verme.',
+  ].join('\n');
+}
+
+/**
  * Yanlış/eksik teslimat adresi, geri dönen kargo, ikinci kargo ücreti, fatura adresi.
  */
 function wrongAddressHint(message: string): string {
@@ -888,6 +912,7 @@ function withPolicyHints(message: string, contextText: string): string {
     undocumentedCheckoutHint(message),
     damagedProductHint(message),
     wrongAddressHint(message),
+    disputeLegalHint(message),
     returnPolicyHint(message),
     urgentSupportHint(message),
   ].filter(Boolean);
@@ -1178,7 +1203,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA): Kullanıcı kargo, iade, garanti, ödeme, fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 TL eşiği; genel iade 14 gün; ödeme YALNIZCA Visa/Mastercard/iyzico/havale-EFT. Kapıda nakit/COD YOK. IBAN uydurma. İNDİRİMLİ iade: Hayır. HASARLI ürün: iletişim + etiket. YANLIŞ ADRES: müşteri sorumluluğu (ORES gecikmeden sorumlu değil); ikinci kargo ücretsiz / fatura anında değişir UYDURMA; e-posta+telefon yönlendir. Belgede yazmayan detay için uydurma; Kural 12 iletişim.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; iade 14 gün; ödeme Visa/Mastercard/iyzico/havale-EFT; kapıda nakit yok; hasar→iletişim; yanlış adres→müşteri sorumluluğu. DAVA/TAHKİM: "hakkınız yok" deme; bireysel tahkim + toplu dava feragati + kendi avukat ücreti + iletişim bilgilerini ver; hukuki danışmanlık yapma. Belgede yazmayan detay için uydurma; Kural 12.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
 ${
   toolActive
