@@ -84,6 +84,7 @@ const POLICY_KEYWORDS = [
   'cerez', 'çerez', 'odeme', 'ödeme', 'fatura', 'e-fatura', 'efatura',
   'kdv', 'vkn', 'vergi', 'kurumsal', 'iyzico', 'havale', 'eft', 'taksit',
   'iban', 'nakit', 'kapıda', 'kapida', 'cod',
+  'iptal', 'acil', 'telefon', 'mesai', 'değişiklik', 'degisiklik',
   'iletisim', 'iletişim', 'sikayet', 'şikayet', 'sozlesme', 'sözleşme',
   'tahkim', 'sms', 'politika', 'hasarli', 'hasarlı', 'kusurlu', 'yasal',
 ];
@@ -769,19 +770,68 @@ function undocumentedCheckoutHint(message: string): string {
 /**
  * İade sorularında özellikle indirimli ürün istisnasını modele dayatır.
  * (Politika: indirimdeki ürünler iade kapsamı dışındadır.)
+ * Not: "sipariş değişikliği" ≠ ürün takası; onu urgentSupportHint karşılar.
  */
 function returnPolicyHint(message: string): string {
   const text = message.toLocaleLowerCase('tr-TR');
-  if (!/iade|cayma|değişim|degisim/.test(text)) return '';
+  // Sipariş değişikliği/iptali buraya düşmesin
+  if (/(sipariş\s*değiş|siparişi\s*değiş|sipariş\s*iptal|değişiklik)/i.test(text) && !/\biade\b|\btakas\b/i.test(text)) {
+    return '';
+  }
+  if (!/(iade|cayma|\bdeğişim\b|\bdegisim\b|\btakas\b)/i.test(text)) return '';
 
   const lines = [
     'İADE ÖZETİ (KESİN): Genel iade süresi teslimattan sonra 14 gündür; ürün kullanılmamış, etiketli ve orijinal ambalajında olmalı. İade talebi iletisim@ores.com.tr üzerinden oluşturulur.',
     'İADE DIŞI (KESİN): İndirimdeki/kampanyalı ürünler ve hediye kartları iade edilemez.',
+    'ÜRÜN DEĞİŞİMİ/TAKAS (KESİN): Doğrudan takas yok; teslim alınmış ürün için iade + yeni sipariş. Bunu kargoya çıkmamış sipariş iptaline uygulama.',
   ];
 
   if (/(indirim|kampanya)/i.test(text)) {
     lines.push(
       'BU SORU İNDİRİMLİ ÜRÜN İADESİ: Cevaba "Hayır" ile başla. İndirimdeki ürün iade edilemez. "14 gün içinde iade edebilirsiniz" DEME — bu genel kural indirimli ürüne uygulanmaz.'
+    );
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Acil sipariş / mesai dışı telefon / iptal tehdidi: çalışma saatleri + doğru kanal.
+ */
+function urgentSupportHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  const urgent =
+    /(acil|hemen|açan yok|yanıt vermez|cevap vermez|iptal edeceğ|sinir|beklet|ulaşamıyorum)/i.test(
+      text
+    );
+  const orderChange =
+    /(sipariş\s*değiş|siparişi\s*değiş|sipariş\s*iptal|siparişi\s*iptal|değişiklik|iptal et)/i.test(
+      text
+    );
+  const phoneOrHours =
+    /(telefon|arıyorum|aradım|açan yok|mesai|çalışma saat|akşam|gece|arayabilir|\d{1,2}\s*[:.]\s*\d{2})/i.test(
+      text
+    );
+
+  if (!urgent && !orderChange && !phoneOrHours) return '';
+
+  const lines = [
+    'İLETİŞİM / MESAİ (KESİN): Telefon +90 264 531 00 10–11, yalnızca 08:00–18:00. E-posta: iletisim@ores.com.tr (yanıt genelde 1–3 iş günü). İkisini de paylaş.',
+  ];
+
+  if (
+    urgent ||
+    phoneOrHours ||
+    /(akşam|gece|21\s*[:.]|20\s*[:.]|19\s*[:.]|22\s*[:.]|23\s*[:.])/i.test(text)
+  ) {
+    lines.push(
+      'MESAİ DIŞI / TELEFON AÇILMIYOR: Empatiyle belirt — telefon hattı 08:00–18:00 dışındadır, akşam/gece açılmaması normal olabilir. Yarın mesai içinde aramasını öner; acil kayıt için HEMEN iletisim@ores.com.tr yazmasını söyle (sipariş numarası + ne değişsin/iptal).'
+    );
+  }
+
+  if (orderChange || /iptal/i.test(text)) {
+    lines.push(
+      'SİPARİŞ DEĞİŞİKLİĞİ / İPTAL ≠ ÜRÜN TAKASI: Kargoya çıkmamış/teslim alınmamış sipariş için ASLA varsayılan cevap "ürünü iade edip yeni sipariş verin" olmasın. Chat üzerinden anlık iptal belgede yok; sipariş no ile e-posta + mesai içi telefon yönlendir. Ürün zaten teslim alındıysa ve takas isteniyorsa o zaman iade + yeni sipariş kuralını uygula.'
     );
   }
 
@@ -794,6 +844,7 @@ function withPolicyHints(message: string, contextText: string): string {
     paymentMethodsHint(message),
     undocumentedCheckoutHint(message),
     returnPolicyHint(message),
+    urgentSupportHint(message),
   ].filter(Boolean);
   if (hints.length === 0) return contextText;
   return `${hints.join('\n\n')}\n\n${contextText}`;
@@ -1035,6 +1086,7 @@ SIRALAMA ÖNCELİĞİ: "En ağır hangisi ve en ucuz mu?" → önce en ağırı 
 Örnek KARMA: "Galatasaray afişi için hangi ölçü uygun ve Icardi hangi takımda?" → çerçeve ölçülerini/kategoriyi öner; Icardi sorusuna cevap VERME ("sporcu bilgisi veremem").
 Örnek KAPSAM İÇİ (ödeme): "şahıs kartı + kurumsal fatura / e-fatura" → reddetme; belgede varsa söyle, yoksa uydurma, Kural 12 iletişim ver.
 Örnek KAPSAM İÇİ (kapıda nakit / IBAN): "Kapıda nakit ödeyebilir miyim? Havale IBAN nerede?" → Kapıda nakit YOK (Hayır); kabul edilenler Visa/Mastercard/iyzico/havale-EFT; IBAN uydurma, iletişime yönlendir.
+Örnek KAPSAM İÇİ (acil / mesai dışı): "Saat 21:00 acil sipariş değişikliği, telefon açılmıyor" → Empati; telefon 08:00–18:00 diye belirt; iletisim@ores.com.tr + yarın telefon; "hemen iade+yeni sipariş" varsayma.
 Örnek KAPSAM İÇİ (özel ölçü): "120x240 ışıklı stand" → reddetme; katalogda yoksa söyle; "üretiriz/üretmeyiz" uydurma; iletişim ver.
 Örnek KAPSAM İÇİ (baskı): "afiş baskısı yapıyor musunuz?" → reddetme. Belgede hizmet yoksa: "Kataloğumuzda/politika metninde afiş baskı hizmeti geçmiyor" de. "Yapıyoruz / yapmıyoruz / mümkün" diye KESİN iddia UYDURMA; teyit için Kural 12 iletişim ver.
 ÇİFT İSTEK: "Sizde X var mı? Yoksa en ucuz 3 çerçeveyi göster" → Önce X katalog kategorilerinde yoksa bunu söyle (iPhone kılıfı/mouse pad vb. YOK); sonra ikinci istek için search_products ile çerçeveleri getir. İlk soruyu yok sayma.
@@ -1082,7 +1134,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
 11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA): Kullanıcı kargo, iade, garanti, ödeme, fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 TL eşiği; genel iade 14 gün; ödeme YALNIZCA Visa/Mastercard/iyzico/havale-EFT. Kapıda nakit/teslimatta ödeme/COD YOK — "yapabilirsiniz" UYDURMA. IBAN numarası belgede yok; uydurma, iletişime yönlendir. İNDİRİMLİ ürün iadesi: Hayır. Belgede yazmayan fatura/baskı için uydurma; Kural 12 iletişim.
-12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı "sizinle iletişime geçmek istiyorum", "iletişim bilgileriniz nedir", "telefon numaranız/adresiniz/e-postanız nedir" gibi bir talepte bulunduğunda, ASLA sadece "web sitesini ziyaret edin" veya "müşteri hizmetlerine ulaşın" gibi genel bir cevapla geçme. Bağlamda "Şirket ve İletişim Bilgileri" bölümünde gerçek e-posta, telefon numarası ve/veya adres bilgisi varsa, bunları DOĞRUDAN ve eksiksiz şekilde paylaş. Bu bilgiler bağlamda yoksa (ve sadece o zaman) genel bir yönlendirme yap.
+12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
 ${
   toolActive
     ? `13. ARAÇ (search_products) SONUCU ÖNCEDEN FİLTRELENDİ (ÇOK ÖNEMLİ): Aşağıdaki BAĞLAM BİLGİLERİ, search_products fonksiyonunun sonucudur ve veritabanı tarafından senin istediğin kritere göre ZATEN TAM ve DOĞRU şekilde filtrelenmiştir. Bu sonuçları kendi başına tekrar filtreleme veya uydurma ürün eklemeye ÇALIŞMA; sonuçtaki gerçek ürün sayısını Kural 10'a göre dürüstçe belirt, hepsi kartlarda gösterilecek.`
