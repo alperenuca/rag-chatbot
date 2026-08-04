@@ -83,6 +83,7 @@ const POLICY_KEYWORDS = [
   'iade', 'degisim', 'değişim', 'kargo', 'teslimat', 'garanti', 'gizlilik',
   'cerez', 'çerez', 'odeme', 'ödeme', 'fatura', 'e-fatura', 'efatura',
   'kdv', 'vkn', 'vergi', 'kurumsal', 'iyzico', 'havale', 'eft', 'taksit',
+  'iban', 'nakit', 'kapıda', 'kapida', 'cod',
   'iletisim', 'iletişim', 'sikayet', 'şikayet', 'sozlesme', 'sözleşme',
   'tahkim', 'sms', 'politika', 'hasarli', 'hasarlı', 'kusurlu', 'yasal',
 ];
@@ -711,6 +712,34 @@ async function shippingQuantityCartHint(
 }
 
 /**
+ * Ödeme yöntemi sorularında kabul edilen yöntemleri dayatır.
+ * Kapıda nakit / COD belgede YOK — uydurulmasın.
+ */
+function paymentMethodsHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  if (
+    !/(ödeme|odeme|kapıda|kapida|nakit|havale|eft|iban|iyzico|visa|mastercard|kredi kart|banka kart|cod|kapıda öde|teslimatta öde)/i.test(
+      text
+    )
+  ) {
+    return '';
+  }
+
+  const lines = [
+    'ÖDEME YÖNTEMLERİ (KESİN — POLİTİKA): Kabul edilenler YALNIZCA: Visa, Mastercard, iyzico ve banka havalesi/EFT.',
+    'KABUL EDİLMEYEN (KESİN): Kapıda nakit, kapıda kart, teslimatta ödeme, COD. Bunlar için "yapabilirsiniz / seçeneğimiz var" DEME — "Hayır, kapıda nakit/teslimatta ödeme sunulmuyor" de; kabul edilen yöntemleri listele.',
+  ];
+
+  if (/iban/i.test(text)) {
+    lines.push(
+      'IBAN: Politika metninde IBAN numarası YOK. Uydurma IBAN yazma. Havale/EFT kabul edildiğini söyle; IBAN için iletisim@ores.com.tr / telefon ile iletişime yönlendir.'
+    );
+  }
+
+  return lines.join('\n');
+}
+
+/**
  * Belgede net yazmayan baskı/kurumsal fatura sorularında uydurma "mümkün/yapıyoruz"
  * cevaplarını engellemek için bağlam ipucu.
  */
@@ -762,6 +791,7 @@ function returnPolicyHint(message: string): string {
 function withPolicyHints(message: string, contextText: string): string {
   const hints = [
     shippingThresholdHint(message),
+    paymentMethodsHint(message),
     undocumentedCheckoutHint(message),
     returnPolicyHint(message),
   ].filter(Boolean);
@@ -1004,6 +1034,7 @@ SIRALAMA ÖNCELİĞİ: "En ağır hangisi ve en ucuz mu?" → önce en ağırı 
 Örnek KAPSAM DIŞI (saf): Kullanıcı sadece "Mauro Icardi nerelidir?" derse → kibarca reddet; futbolcu biyografisi YAZMA.
 Örnek KARMA: "Galatasaray afişi için hangi ölçü uygun ve Icardi hangi takımda?" → çerçeve ölçülerini/kategoriyi öner; Icardi sorusuna cevap VERME ("sporcu bilgisi veremem").
 Örnek KAPSAM İÇİ (ödeme): "şahıs kartı + kurumsal fatura / e-fatura" → reddetme; belgede varsa söyle, yoksa uydurma, Kural 12 iletişim ver.
+Örnek KAPSAM İÇİ (kapıda nakit / IBAN): "Kapıda nakit ödeyebilir miyim? Havale IBAN nerede?" → Kapıda nakit YOK (Hayır); kabul edilenler Visa/Mastercard/iyzico/havale-EFT; IBAN uydurma, iletişime yönlendir.
 Örnek KAPSAM İÇİ (özel ölçü): "120x240 ışıklı stand" → reddetme; katalogda yoksa söyle; "üretiriz/üretmeyiz" uydurma; iletişim ver.
 Örnek KAPSAM İÇİ (baskı): "afiş baskısı yapıyor musunuz?" → reddetme. Belgede hizmet yoksa: "Kataloğumuzda/politika metninde afiş baskı hizmeti geçmiyor" de. "Yapıyoruz / yapmıyoruz / mümkün" diye KESİN iddia UYDURMA; teyit için Kural 12 iletişim ver.
 ÇİFT İSTEK: "Sizde X var mı? Yoksa en ucuz 3 çerçeveyi göster" → Önce X katalog kategorilerinde yoksa bunu söyle (iPhone kılıfı/mouse pad vb. YOK); sonra ikinci istek için search_products ile çerçeveleri getir. İlk soruyu yok sayma.
@@ -1050,7 +1081,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA): Kullanıcı kargo, iade, garanti, ödeme, fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 TL eşiği; genel iade 14 gün; ödeme Visa/Mastercard/iyzico/EFT. İNDİRİMLİ/KAMPANYALI ürün iadesi: KAPSAM DIŞI — "Hayır, indirimdeki ürünler iade edilemez" (14 gün kuralını indirimliye uygulama). Belgede yazmayan fatura/baskı için uydurma; Kural 12 iletişim.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA): Kullanıcı kargo, iade, garanti, ödeme, fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 TL eşiği; genel iade 14 gün; ödeme YALNIZCA Visa/Mastercard/iyzico/havale-EFT. Kapıda nakit/teslimatta ödeme/COD YOK — "yapabilirsiniz" UYDURMA. IBAN numarası belgede yok; uydurma, iletişime yönlendir. İNDİRİMLİ ürün iadesi: Hayır. Belgede yazmayan fatura/baskı için uydurma; Kural 12 iletişim.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı "sizinle iletişime geçmek istiyorum", "iletişim bilgileriniz nedir", "telefon numaranız/adresiniz/e-postanız nedir" gibi bir talepte bulunduğunda, ASLA sadece "web sitesini ziyaret edin" veya "müşteri hizmetlerine ulaşın" gibi genel bir cevapla geçme. Bağlamda "Şirket ve İletişim Bilgileri" bölümünde gerçek e-posta, telefon numarası ve/veya adres bilgisi varsa, bunları DOĞRUDAN ve eksiksiz şekilde paylaş. Bu bilgiler bağlamda yoksa (ve sadece o zaman) genel bir yönlendirme yap.
 ${
   toolActive
