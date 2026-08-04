@@ -2652,7 +2652,16 @@ export async function POST(req: NextRequest) {
         messageFilters.profile_thickness_mm != null) &&
       !messageFilters.out_of_stock_only
     ) {
-      const filterCategories = findMentionedCategories(message, knownCategories);
+      // "5000 TL altı var mı?" takip sorusunda kategori mesajda yok → geçmişten al
+      // (yoksa tüm çerçeveler gelir, metin hâlâ "kaldırım panosu" der — çelişki).
+      let filterCategories = findMentionedCategories(message, knownCategories);
+      const categoryFromHistory =
+        filterCategories.length === 0 && cleanHistory.length > 0
+          ? inferCategoryFromHistory(cleanHistory, message, knownCategories)
+          : null;
+      if (categoryFromHistory) {
+        filterCategories = [categoryFromHistory];
+      }
       const wantsSingleFilter =
         looksLikeRankingOrSingleItemQuestion(message) &&
         !(messageFilters.colors && messageFilters.colors.length > 1) &&
@@ -2675,6 +2684,14 @@ export async function POST(req: NextRequest) {
         seenFilter.add(key);
         return true;
       });
+      // Bütçe üstü ürün sızmasın (DB filtresi kaçsa bile)
+      if (messageFilters.max_price != null) {
+        const cap = messageFilters.max_price;
+        filterDocs = filterDocs.filter((doc) => {
+          const price = doc.metadata?.price;
+          return typeof price === 'number' && price <= cap;
+        });
+      }
 
       if (
         wantsSingleFilter &&
@@ -2706,6 +2723,12 @@ export async function POST(req: NextRequest) {
         ...messageFilters,
         category: filterCategories[0],
       });
+      const budgetGuard =
+        messageFilters.max_price != null
+          ? documents.length === 0
+            ? `BÜTÇE SONUCU (KESİN): ${filterCategories[0] ? `"${filterCategories[0]}" kategorisinde ` : ''}${messageFilters.max_price} TL ve altı ürün YOK. "Evet var" DEME. 5310 gibi üst fiyatlı ürünü bu bütçeye sokma. Cevaba "Hayır" ile başla; istersen daha yüksek bütçe veya diğer kategoriyi sor.\n\n`
+            : `BÜTÇE SONUCU (KESİN): ${messageFilters.max_price} TL altı/eşit ${documents.length} ürün. Fiyatı ${messageFilters.max_price} TL'yi aşan hiçbir ürünü "uygun" diye sunma.\n\n`
+          : '';
       const priceStockGuard = wantsInlinePriceStockSummary(message)
         ? buildProductPriceStockSummary(documents)
         : '';
@@ -2729,7 +2752,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: `${profileHitGuard}${multiGuard}${colorCompareGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
+              contextText: `${budgetGuard}${profileHitGuard}${multiGuard}${colorCompareGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
               hasProductCards: filterDerived.hasProductCards,
               isAmbiguousGenericQuery: filterDerived.isAmbiguousGenericQuery,
               toolActive: true,
@@ -2744,6 +2767,15 @@ export async function POST(req: NextRequest) {
       });
 
       rawReply = filterCompletion.choices[0].message.content ?? '';
+      // Bütçe + kategori boşsa zorunlu Hayır (model "evet panosu var" + çerçeve kartı uydurmasın)
+      if (
+        messageFilters.max_price != null &&
+        documents.length === 0 &&
+        filterCategories[0]
+      ) {
+        rawReply = `Hayır, "${filterCategories[0]}" kategorisinde ${messageFilters.max_price} TL ve altında ürün bulunmamaktadır. Daha yüksek bir bütçe veya başka bir kategori (ör. afiş çerçevesi) denemek ister misiniz?`;
+        hasProductCards = false;
+      }
       // Profil filtresi sonuç verdiyse modelin "yok" demesini düzelt
       if (
         messageFilters.profile_thickness_mm != null &&

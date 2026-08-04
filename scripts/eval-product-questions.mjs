@@ -16,7 +16,7 @@ if (!url || !anon || !service) {
   process.exit(1);
 }
 
-/** @type {{ name: string, q: string, mustInclude?: RegExp[], mustNotInclude?: RegExp[] }[]} */
+/** @type {{ name: string, q: string, history?: {role:string,content:string}[], mustInclude?: RegExp[], mustNotInclude?: RegExp[], minProductSources?: number, maxProductSources?: number }[]} */
 const CASES = [
   {
     name: 'En ucuz çerçeve',
@@ -146,6 +146,35 @@ const CASES = [
     mustInclude: [/16|stok/i],
     mustNotInclude: [/evet[,.].{0,30}50\s*adet|50 adet sipariş verebilirsiniz/i],
   },
+  {
+    name: 'Kategori browse: 27 kart (citation cap tuzağı)',
+    q: 'afiş çerçevesi',
+    mustInclude: [/\[\[URUN_KARTLARI\]\]/i],
+    // API sources içinde en az 20 ürün olmalı (3'e kesilmemeli)
+    minProductSources: 20,
+  },
+  {
+    name: 'Tüm ürünler kartlı',
+    q: 'tüm ürünlerini görmek isterim',
+    mustInclude: [/\[\[URUN_KARTLARI\]\]/i, /28|27|ürün/i],
+    minProductSources: 20,
+    mustNotInclude: [/aşağıda inceleyebilirsiniz:\s*İlgilendiğiniz/i],
+  },
+  {
+    name: 'Bütçe takip: panosu 5000 altı → Hayır (çerçeve kartı yok)',
+    history: [
+      { role: 'user', content: '500tl altı kaldırım panosu var mı' },
+      {
+        role: 'assistant',
+        content:
+          'Hayır, 500 TL altında kaldırım panosu bulunmamaktadır. Tek kaldırım panosu 5310 TL.',
+      },
+    ],
+    q: '5000 tl altı var mı',
+    mustInclude: [/hayır/i, /kaldırım/i],
+    mustNotInclude: [/evet[,.].{0,80}5310|5310 TL.{0,40}altında|uygun/i],
+    maxProductSources: 0,
+  },
 ];
 
 const email = `eval-prod-${Date.now()}@wed1ng.shop`;
@@ -179,7 +208,7 @@ function cookieHeader(session) {
   return `${name}=${encodeURIComponent(JSON.stringify(payload))}`;
 }
 
-function scoreReply(reply, testCase) {
+function scoreReply(reply, testCase, sources) {
   const text = String(reply);
   const fails = [];
   for (const re of testCase.mustInclude || []) {
@@ -187,6 +216,19 @@ function scoreReply(reply, testCase) {
   }
   for (const re of testCase.mustNotInclude || []) {
     if (re.test(text)) fails.push(`forbidden: ${re}`);
+  }
+  const productN = (Array.isArray(sources) ? sources : []).filter(
+    (s) => s?.metadata?.type === 'product'
+  ).length;
+  if (typeof testCase.minProductSources === 'number') {
+    if (productN < testCase.minProductSources) {
+      fails.push(`productSources ${productN} < ${testCase.minProductSources}`);
+    }
+  }
+  if (typeof testCase.maxProductSources === 'number') {
+    if (productN > testCase.maxProductSources) {
+      fails.push(`productSources ${productN} > ${testCase.maxProductSources}`);
+    }
   }
   return fails;
 }
@@ -223,19 +265,25 @@ async function main() {
       const res = await fetch(`${base}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: cookie },
-        body: JSON.stringify({ message: testCase.q, history: [] }),
+        body: JSON.stringify({
+          message: testCase.q,
+          history: Array.isArray(testCase.history) ? testCase.history : [],
+        }),
       });
       const text = await res.text();
       let reply = text;
+      let sources = [];
       try {
         const json = JSON.parse(text);
         reply = json.reply ?? json.message ?? json.error ?? text;
+        sources = json.sources ?? [];
         if (json.error && json.reply == null) reply = `ERROR: ${json.error}`;
       } catch {
         /* raw */
       }
       console.log(`HTTP ${res.status} | ${String(reply).replace(/\s+/g, ' ').slice(0, 320)}`);
-      const fails = res.status !== 200 ? [`HTTP ${res.status}`] : scoreReply(reply, testCase);
+      const fails =
+        res.status !== 200 ? [`HTTP ${res.status}`] : scoreReply(reply, testCase, sources);
       if (fails.length === 0) {
         console.log('✅ PASS');
         passed += 1;
