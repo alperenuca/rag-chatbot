@@ -452,6 +452,29 @@ function inferCategoryFromHistory(
   return findMentionedCategories(blob, knownCategories)[0] ?? null;
 }
 
+/**
+ * Bütçe takibinde kategori: sadece KULLANICININ seçtiği.
+ * Asistanın "afiş çerçevesi veya kaldırım panosu" menüsü kategori sayılmaz
+ * (aksi halde "800 lira altında" yanlışlıkla panoya kilitlenir).
+ */
+function inferUserCommittedCategoryFromHistory(
+  history: HistoryTurn[],
+  message: string,
+  knownCategories: string[]
+): string | null {
+  const fromMessage = findMentionedCategories(message, knownCategories);
+  if (fromMessage.length === 1) return fromMessage[0];
+  if (fromMessage.length > 1) return fromMessage[0];
+
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i].role !== 'user') continue;
+    const cats = findMentionedCategories(history[i].content, knownCategories);
+    if (cats.length === 1) return cats[0];
+    if (cats.length > 1) return cats[0];
+  }
+  return null;
+}
+
 /** "evet başka kategoride olsun" — ürün pin'i değil, kategori pivotu */
 function looksLikeAcceptAlternateCategory(message: string): boolean {
   const t = message.toLocaleLowerCase('tr-TR');
@@ -2778,12 +2801,16 @@ export async function POST(req: NextRequest) {
         messageFilters.profile_thickness_mm != null) &&
       !messageFilters.out_of_stock_only
     ) {
-      // "5000 TL altı var mı?" takip sorusunda kategori mesajda yok → geçmişten al
-      // (yoksa tüm çerçeveler gelir, metin hâlâ "kaldırım panosu" der — çelişki).
+      // "5000 TL altı var mı?" → kullanıcı daha önce kategori seçtiyse onu taşı.
+      // Asistan menüsündeki "afiş / kaldırım" isimlerini kategori seçimi SAYMA.
       let filterCategories = findMentionedCategories(message, knownCategories);
       const categoryFromHistory =
         filterCategories.length === 0 && cleanHistory.length > 0
-          ? inferCategoryFromHistory(cleanHistory, message, knownCategories)
+          ? inferUserCommittedCategoryFromHistory(
+              cleanHistory,
+              message,
+              knownCategories
+            )
           : null;
       if (categoryFromHistory) {
         filterCategories = [categoryFromHistory];

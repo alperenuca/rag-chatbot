@@ -176,6 +176,24 @@ const CASES = [
     maxProductSources: 0,
   },
   {
+    name: 'Sadece bütçe: asistan menüsü panoya kilitlemesin',
+    history: [
+      { role: 'user', content: 'ürün satın almak istiyorum' },
+      {
+        role: 'assistant',
+        content:
+          'Hangi ürünü satın almak istediğinizi belirtirseniz yardımcı olabilirim. Afiş çerçevesi veya kaldırım panosu gibi ürünlerimiz mevcut. Hangisini incelemek istersiniz?',
+      },
+    ],
+    q: '800 lira altında',
+    mustInclude: [/\[\[URUN_KARTLARI\]\]/i, /çerçeve|afiş|ürün/i],
+    mustNotInclude: [
+      /hayır.{0,40}kaldırım\s*panosu/i,
+      /"Kaldırım Panosu" kategorisinde 800/i,
+    ],
+    minProductSources: 3,
+  },
+  {
     name: 'Başka kategori kabul: 900 altı çerçeve (panosu pin yok)',
     history: [
       { role: 'user', content: 'başka ürün bakıcam 900 tl altında' },
