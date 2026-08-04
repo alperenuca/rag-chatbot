@@ -86,6 +86,7 @@ const POLICY_KEYWORDS = [
   'iban', 'nakit', 'kapıda', 'kapida', 'cod',
   'iptal', 'acil', 'telefon', 'mesai', 'değişiklik', 'degisiklik',
   'hasar', 'kirik', 'kırık', 'tutanak', 'yanlis urun', 'yanlış ürün',
+  'adres', 'yanlis adres', 'yanlış adres', 'ikinci kargo',
   'iletisim', 'iletişim', 'sikayet', 'şikayet', 'sozlesme', 'sözleşme',
   'tahkim', 'sms', 'politika', 'hasarli', 'hasarlı', 'kusurlu', 'yasal',
 ];
@@ -797,6 +798,26 @@ function returnPolicyHint(message: string): string {
 }
 
 /**
+ * Yanlış/eksik teslimat adresi, geri dönen kargo, ikinci kargo ücreti, fatura adresi.
+ */
+function wrongAddressHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  if (
+    !/(adres|yanlış gir|yanlis gir|başka şehir|baska sehir|geri dön|geri don|ikinci kargo|tekrar kargo|fatura adres|teslimat adres)/i.test(
+      text
+    )
+  ) {
+    return '';
+  }
+
+  return [
+    'YANLIŞ / EKSİK ADRES (KESİN): Politikaya göre adresin doğru girilmesi müşteri sorumluluğundadır. Yanlış veya eksik adres bilgilerinden kaynaklanan gecikmelerden ORES sorumlu değildir. Bunu kibarca, suçlayıcı olmadan belirt.',
+    'İkinci kargo ücreti / fatura adresi hemen değişsin: Belgede "ikinci kargo ücretsiz" veya "fatura adresi anında chat ile değişir" YOK. "Ücretsiz yeniden göndeririz / hemen değiştiririz / hata sistemimizde" diye KABUL veya UYDURMA yapma.',
+    'Çözüm kanalı: sipariş numarası ile iletisim@ores.com.tr ve mesai içinde +90 264 531 00 10–11 (08:00–18:00). Operasyon ekibinin değerlendireceğini söyle.',
+  ].join('\n');
+}
+
+/**
  * Hasarlı/kusurlu/yanlış ürün: genel iade belirsizliğine düşmeden doğru süreci ver.
  */
 function damagedProductHint(message: string): string {
@@ -866,6 +887,7 @@ function withPolicyHints(message: string, contextText: string): string {
     paymentMethodsHint(message),
     undocumentedCheckoutHint(message),
     damagedProductHint(message),
+    wrongAddressHint(message),
     returnPolicyHint(message),
     urgentSupportHint(message),
   ].filter(Boolean);
@@ -1156,7 +1178,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA): Kullanıcı kargo, iade, garanti, ödeme, fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 TL eşiği; genel iade 14 gün; ödeme YALNIZCA Visa/Mastercard/iyzico/havale-EFT. Kapıda nakit/COD YOK. IBAN uydurma. İNDİRİMLİ iade: Hayır. HASARLI/KUSURLU/YANLIŞ ürün: derhal iletişim; ORES değerlendirir; kabulde iade kargo etiketi — "kargo kesin siz/biz" uydurma. Belgede yazmayan fatura/baskı için uydurma; Kural 12 iletişim.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA): Kullanıcı kargo, iade, garanti, ödeme, fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 TL eşiği; genel iade 14 gün; ödeme YALNIZCA Visa/Mastercard/iyzico/havale-EFT. Kapıda nakit/COD YOK. IBAN uydurma. İNDİRİMLİ iade: Hayır. HASARLI ürün: iletişim + etiket. YANLIŞ ADRES: müşteri sorumluluğu (ORES gecikmeden sorumlu değil); ikinci kargo ücretsiz / fatura anında değişir UYDURMA; e-posta+telefon yönlendir. Belgede yazmayan detay için uydurma; Kural 12 iletişim.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
 ${
   toolActive
