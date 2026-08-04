@@ -366,19 +366,20 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     }
   }
 
-  // Renk / görünüm ipuçları
-  const colorHints: { re: RegExp; value: string }[] = [
-    { re: /\bahşap\b/, value: 'ahşap' },
-    { re: /\bkahverengi\b/, value: 'kahverengi' },
-    { re: /\bgümüş\b|\bgumus\b/, value: 'gümüş' },
-    { re: /\bbeyaz\b/, value: 'beyaz' },
-    { re: /\bsiyah\b/, value: 'siyah' },
-    { re: /\bkırmızı\b|\bkirmizi\b/, value: 'kırmızı' },
-  ];
-  for (const hint of colorHints) {
-    if (hint.re.test(text)) {
-      filters.color = hint.value;
-      break;
+  // Renk / görünüm — tek renk filtre; birden fazla renk = karşılaştırma (OR)
+  const colors = extractColorsFromMessage(text);
+  if (colors.length === 1) {
+    filters.color = colors[0];
+  } else if (colors.length > 1) {
+    filters.colors = colors;
+  }
+
+  // Profil kalınlığı: "32 mm", "32mm profil"
+  const profileMatch = text.match(/\b(\d{2})\s*mm\b/i);
+  if (profileMatch?.[1]) {
+    const mm = Number(profileMatch[1]);
+    if (mm === 25 || mm === 32) {
+      filters.profile_thickness_mm = mm;
     }
   }
 
@@ -453,6 +454,42 @@ function wantsInlinePriceStockSummary(message: string): boolean {
   const asksWrite =
     /(yaz|söyle|nedir|kaç|göster|her bir|adet(?:i|ini)?|fiyatını|stokunu)/i.test(text);
   return asksFact && asksWrite;
+}
+
+/** İki+ renk karşılaştırması için bağlama zorunlu fiyat özeti. */
+function buildMultiColorCompareGuard(
+  docs: MatchedDocument[],
+  colors: string[]
+): string {
+  if (colors.length < 2) return '';
+  const products = docs.filter((doc) => doc.metadata?.type === 'product');
+  const lines = ['RENK KARŞILAŞTIRMASI (KESİN — her iki rengi de kullan, "bilmiyorum" DEME):'];
+
+  for (const color of colors) {
+    const needle = color.toLocaleLowerCase('tr-TR');
+    const match = products.find((doc) => {
+      const raw = doc.metadata?.color;
+      return typeof raw === 'string' && raw.toLocaleLowerCase('tr-TR').includes(needle);
+    });
+    if (!match) {
+      lines.push(`- ${color}: bu filtreyle ürün bulunamadı (uydurma).`);
+      continue;
+    }
+    const title =
+      typeof match.metadata?.title === 'string' ? match.metadata.title : 'Ürün';
+    const price = match.metadata?.price;
+    const stock = match.metadata?.stock;
+    lines.push(
+      `- ${color}: ${title} — ${typeof price === 'number' ? `${price} TL` : 'fiyat yok'}, stok ${
+        typeof stock === 'number' ? stock : '?'
+      }`
+    );
+  }
+
+  lines.push(
+    'Fiyat farkını sayısal hesapla (büyük − küçük); hangisinin daha ucuz olduğunu açıkça söyle.'
+  );
+  return `${lines.join('\n')}\n\n`;
 }
 
 /** Arama sonuçlarından kısa fiyat/stok özeti (modele + gerekirse yanıta). */
@@ -702,9 +739,33 @@ interface SearchProductsArgs {
   on_discount_only?: boolean;
   dimension?: string;
   color?: string;
+  /** İki renk karşılaştırması ("kırmızı ile siyah") için OR filtresi */
+  colors?: string[];
+  /** Profil kalınlığı (mm), örn. 25 / 32 */
+  profile_thickness_mm?: number;
   query_text?: string;
   sort_by?: SortBy;
   limit?: number;
+}
+
+// NOT: JS \b Unicode/Türkçe harflerde (ı, ş, ğ…) kırılır; \b kullanma.
+const COLOR_HINTS: { re: RegExp; value: string }[] = [
+  { re: /(?<!\p{L})ahşap(?!\p{L})/iu, value: 'ahşap' },
+  { re: /(?<!\p{L})kahverengi(?!\p{L})/iu, value: 'kahverengi' },
+  { re: /(?<!\p{L})(?:gümüş|gumus)(?!\p{L})/iu, value: 'gümüş' },
+  { re: /(?<!\p{L})(?:kırık\s*beyaz|beyaz)(?!\p{L})/iu, value: 'beyaz' },
+  { re: /(?<!\p{L})siyah(?!\p{L})/iu, value: 'siyah' },
+  { re: /(?<!\p{L})(?:kırmızı|kirmizi)(?!\p{L})/iu, value: 'kırmızı' },
+];
+
+function extractColorsFromMessage(text: string): string[] {
+  const found: string[] = [];
+  for (const hint of COLOR_HINTS) {
+    if (hint.re.test(text) && !found.includes(hint.value)) {
+      found.push(hint.value);
+    }
+  }
+  return found;
 }
 
 const FREE_SHIPPING_THRESHOLD_TL = 750;
@@ -1142,6 +1203,11 @@ function emptySearchGuard(
   if (filters.out_of_stock_only) bits.push('stok = 0');
   if (filters.on_discount_only) bits.push('yalnızca indirimli');
   if (filters.dimension) bits.push(`ölçü ${filters.dimension}`);
+  if (filters.profile_thickness_mm != null) {
+    bits.push(`profil ${filters.profile_thickness_mm} mm`);
+  }
+  if (filters.colors?.length) bits.push(`renkler ${filters.colors.join('/')}`);
+  else if (filters.color) bits.push(`renk ${filters.color}`);
   if (filters.category) bits.push(`kategori ${filters.category}`);
   const criteria = bits.length > 0 ? bits.join(', ') : 'verilen kriterler';
   return `ÖNEMLİ (BOŞ ARAMA): Bu filtrelerle (${criteria}) 0 ürün bulundu. ASLA "1 ürün var / yalnızca N ürün" diye uydurma. Kibarca bu kritere uyan ürün olmadığını söyle; gerekirse filtreyi gevşetmeyi (bütçe/stok) veya diğer kategoriyi öner.\n\n`;
@@ -1193,7 +1259,18 @@ function buildSearchProductsTool(knownCategoriesText: string): ChatCompletionToo
           color: {
             type: 'string',
             description:
-              'Renk/görünüm filtresi. Kullanıcı "beyaz", "gümüş", "ahşap desen", "kahverengi", "siyah" derse bu değeri ver.',
+              'Tek renk filtresi. Kullanıcı yalnızca bir renk söylediyse ver. İki renk karşılaştırıyorsa (kırmızı ile siyah) color BOŞ bırak, colors kullan.',
+          },
+          colors: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Birden fazla renk karşılaştırması için (örn. ["kırmızı","siyah"]). Bu durumda color alanını doldurma.',
+          },
+          profile_thickness_mm: {
+            type: 'number',
+            description:
+              'Profil kalınlığı mm. Kullanıcı "32 mm profil", "25mm çerçeve" dediyse 32 veya 25 ver. Katalogda tipik değerler 25 ve 32.',
           },
           query_text: {
             type: 'string',
@@ -1260,7 +1337,22 @@ async function executeSearchProducts(
       query = query.ilike('metadata->>dimension', `%${safeDimension}%`);
     }
   }
-  if (args.color && args.color.trim()) {
+  if (
+    typeof args.profile_thickness_mm === 'number' &&
+    Number.isFinite(args.profile_thickness_mm)
+  ) {
+    query = query.eq(
+      'metadata->>profile_thickness_mm',
+      String(Math.floor(args.profile_thickness_mm))
+    );
+  }
+
+  // Tek renk SQL'de; çoklu renk Türkçe/OR sorunlarına takılmasın diye
+  // sorgudan sonra bellek içi süzülür.
+  const multiColors = (args.colors ?? [])
+    .map((c) => c.trim().replace(/[(),%]/g, ''))
+    .filter(Boolean);
+  if (multiColors.length <= 1 && args.color && args.color.trim()) {
     const safeColor = args.color.trim().replace(/[(),%]/g, '');
     if (safeColor) {
       // "ahşap" çoğu üründe color değil title/material alanında geçer
@@ -1303,19 +1395,51 @@ async function executeSearchProducts(
   // Kullanıcı "en ağır ürün hangisi" gibi TEK bir ürün istediğinde model
   // limit=1 gönderir; bu sayede yanıtta sadece o 1 ürünün kartı görünür.
   // Aksi halde (liste isteklerinde) varsayılan üst sınır 100'dür.
+  // Çoklu renk için SQL'de renk yok → daha geniş çekip bellekten süz.
   const limit =
     typeof args.limit === 'number' && Number.isFinite(args.limit) && args.limit > 0
       ? Math.min(Math.floor(args.limit), 200)
       : 100;
+  const fetchLimit = multiColors.length > 1 ? Math.max(limit, 100) : limit;
 
-  const { data, error } = await query.limit(limit);
+  const { data, error } = await query.limit(fetchLimit);
 
   if (error) {
     console.error('search_products sorgu hatası:', error);
     return [];
   }
 
-  return (data ?? []) as MatchedDocument[];
+  let rows = (data ?? []) as MatchedDocument[];
+
+  if (multiColors.length > 1) {
+    const needles = multiColors.map((c) => c.toLocaleLowerCase('tr-TR'));
+    const matched: MatchedDocument[] = [];
+    for (const needle of needles) {
+      const hit = rows.find((doc) => {
+        const raw = doc.metadata?.color;
+        const title = doc.metadata?.title;
+        const material = doc.metadata?.material;
+        const blob = [raw, title, material]
+          .filter((v): v is string => typeof v === 'string')
+          .join(' ')
+          .toLocaleLowerCase('tr-TR');
+        return blob.includes(needle);
+      });
+      if (hit && !matched.includes(hit)) matched.push(hit);
+    }
+    // Her renkten birer ürün; yoksa renk içeren tüm satırlar
+    if (matched.length > 0) {
+      rows = matched;
+    } else {
+      rows = rows.filter((doc) => {
+        const raw = typeof doc.metadata?.color === 'string' ? doc.metadata.color : '';
+        const lower = raw.toLocaleLowerCase('tr-TR');
+        return needles.some((n) => lower.includes(n));
+      });
+    }
+  }
+
+  return rows;
 }
 
 interface BuildSystemPromptParams {
@@ -1993,6 +2117,10 @@ export async function POST(req: NextRequest) {
       const priceStockGuard = wantsInlinePriceStockSummary(message)
         ? buildProductPriceStockSummary(documents)
         : '';
+      const colorCompareGuard = buildMultiColorCompareGuard(
+        documents,
+        messageFilters.colors ?? []
+      );
 
       const rankCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
@@ -2001,7 +2129,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: `${countGuard}${priceStockGuard}${rankGuard}${rankDerived.contextText}`,
+              contextText: `${countGuard}${colorCompareGuard}${priceStockGuard}${rankGuard}${rankDerived.contextText}`,
               hasProductCards: rankDerived.hasProductCards,
               isAmbiguousGenericQuery: rankDerived.isAmbiguousGenericQuery,
               toolActive: true,
@@ -2025,27 +2153,62 @@ export async function POST(req: NextRequest) {
         }
       }
     } else if (
-      // "1000 TL altı B2" — ranking yoksa bile zorunlu filtreli çoklu arama
+      // "1000 TL altı B2" / "32 mm" / "kırmızı ile siyah A1" — zorunlu filtreli arama
       (messageFilters.dimension ||
         messageFilters.max_price != null ||
         messageFilters.min_price != null ||
-        messageFilters.color) &&
+        messageFilters.color ||
+        (messageFilters.colors && messageFilters.colors.length > 0) ||
+        messageFilters.profile_thickness_mm != null) &&
       !messageFilters.out_of_stock_only
     ) {
       const filterCategories = findMentionedCategories(message, knownCategories);
-      const filterDocs = await executeSearchProducts(supabase, knownCategories, {
+      const wantsSingleFilter =
+        looksLikeRankingOrSingleItemQuestion(message) &&
+        !(messageFilters.colors && messageFilters.colors.length > 1) &&
+        !/en (?:ucuz|pahalı|pahali|ağır|agir|hafif)\s+\d+/i.test(message);
+      let filterDocs = await executeSearchProducts(supabase, knownCategories, {
         ...(filterCategories[0] ? { category: filterCategories[0] } : {}),
         ...messageFilters,
+        // Çoklu renkte tek color ile ezilmesin
+        color:
+          messageFilters.colors && messageFilters.colors.length > 1
+            ? undefined
+            : messageFilters.color,
         sort_by: messageFilters.sort_by ?? 'price_asc',
         limit: 50,
       });
       const seenFilter = new Set<string>();
-      documents = filterDocs.filter((doc) => {
+      filterDocs = filterDocs.filter((doc) => {
         const key = `${doc.metadata?.category ?? ''}|${doc.metadata?.title ?? ''}`;
         if (seenFilter.has(key)) return false;
         seenFilter.add(key);
         return true;
       });
+
+      if (
+        wantsSingleFilter &&
+        !(messageFilters.colors && messageFilters.colors.length > 1)
+      ) {
+        if (
+          messageFilters.sort_by === 'price_asc' ||
+          messageFilters.sort_by === 'price_desc' ||
+          messageFilters.sort_by == null
+        ) {
+          const prices = filterDocs
+            .map((doc) => doc.metadata?.price)
+            .filter((price): price is number => typeof price === 'number');
+          if (prices.length > 0) {
+            const target = Math.min(...prices);
+            const tied = filterDocs.filter((doc) => doc.metadata?.price === target);
+            filterDocs = tied.length > 0 ? tied : filterDocs.slice(0, 1);
+          } else {
+            filterDocs = filterDocs.slice(0, 1);
+          }
+        }
+      }
+
+      documents = filterDocs;
 
       const filterDerived = buildDerivedPromptFields(documents, true);
       hasProductCards = filterDerived.hasProductCards;
@@ -2056,6 +2219,10 @@ export async function POST(req: NextRequest) {
       const priceStockGuard = wantsInlinePriceStockSummary(message)
         ? buildProductPriceStockSummary(documents)
         : '';
+      const colorCompareGuard = buildMultiColorCompareGuard(
+        documents,
+        messageFilters.colors ?? []
+      );
       const multiGuard =
         documents.length > 1
           ? `ÖNEMLİ: Filtreye uyan ${documents.length} ürün var; "yalnızca 1 ürün" DEME.\n\n`
@@ -2068,7 +2235,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: `${multiGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
+              contextText: `${multiGuard}${colorCompareGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
               hasProductCards: filterDerived.hasProductCards,
               isAmbiguousGenericQuery: filterDerived.isAmbiguousGenericQuery,
               toolActive: true,
@@ -2083,6 +2250,30 @@ export async function POST(req: NextRequest) {
       });
 
       rawReply = filterCompletion.choices[0].message.content ?? '';
+      // Model tek renge kayarsa karşılaştırma özetini zorunlu ekle
+      if (colorCompareGuard && (messageFilters.colors?.length ?? 0) > 1) {
+        const prices = documents
+          .map((doc) => doc.metadata?.price)
+          .filter((price): price is number => typeof price === 'number');
+        const hasBothPrices =
+          prices.length >= 2 &&
+          prices.every((price) => rawReply.includes(String(price)));
+        if (!hasBothPrices) {
+          const compact = colorCompareGuard
+            .replace(/^RENK KARŞILAŞTIRMASI[^\n]*\n/, '')
+            .trim();
+          if (compact) {
+            const nums = prices;
+            let diffLine = '';
+            if (nums.length >= 2) {
+              const hi = Math.max(...nums);
+              const lo = Math.min(...nums);
+              diffLine = `\nFiyat farkı: ${hi - lo} TL; daha ucuz olan ${lo} TL olan modeldir.`;
+            }
+            rawReply = `${rawReply}\n\n${compact}${diffLine}`.trim();
+          }
+        }
+      }
     } else if (directCategoryMatches.length > 0) {
       const categoryResultDocs: MatchedDocument[] = [];
       for (const category of directCategoryMatches) {
@@ -2190,6 +2381,10 @@ export async function POST(req: NextRequest) {
           const outOfStock = Boolean(
             args.out_of_stock_only || messageFilters.out_of_stock_only
           );
+          const mergedColors =
+            (args.colors && args.colors.length > 0
+              ? args.colors
+              : messageFilters.colors) ?? [];
           const mergedArgs: SearchProductsArgs = {
             ...messageFilters,
             ...args,
@@ -2202,20 +2397,28 @@ export async function POST(req: NextRequest) {
               : Boolean(args.in_stock_only || messageFilters.in_stock_only),
             on_discount_only: Boolean(args.on_discount_only || messageFilters.on_discount_only),
             dimension: args.dimension || messageFilters.dimension,
-            color: args.color || messageFilters.color,
+            profile_thickness_mm:
+              args.profile_thickness_mm ?? messageFilters.profile_thickness_mm,
+            colors: mergedColors.length > 1 ? mergedColors : undefined,
+            color:
+              mergedColors.length > 1
+                ? undefined
+                : args.color || messageFilters.color,
             sort_by: args.sort_by || messageFilters.sort_by,
           };
 
-          // Bütçe/ölçü listesinde model limit=1 gönderirse tüm eşleşmeleri kaçırma
-          // (tekil "hangisi/en ağır" hariç).
+          // Bütçe/ölçü/profil/çoklu renk listesinde model limit=1 gönderirse kaçırma
           const wantsSingleTool =
             looksLikeRankingOrSingleItemQuestion(message) &&
+            mergedColors.length < 2 &&
             !/en (?:ucuz|pahalı|pahali|ağır|agir|hafif)\s+\d+/i.test(message);
           if (
             !wantsSingleTool &&
             (mergedArgs.dimension ||
               mergedArgs.max_price != null ||
-              mergedArgs.min_price != null) &&
+              mergedArgs.min_price != null ||
+              mergedArgs.profile_thickness_mm != null ||
+              (mergedArgs.colors && mergedArgs.colors.length > 1)) &&
             (mergedArgs.limit == null || mergedArgs.limit <= 1)
           ) {
             mergedArgs.limit = 50;
