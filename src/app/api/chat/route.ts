@@ -786,7 +786,10 @@ function returnPolicyHint(message: string): string {
   if (!/(iade|cayma|\bdeğişim\b|\bdegisim\b|\btakas\b)/i.test(text)) return '';
 
   const lines = [
-    'İADE ÖZETİ (KESİN): Genel iade süresi teslimattan sonra 14 gündür; ürün kullanılmamış, etiketli ve orijinal ambalajında olmalı. İade talebi iletisim@ores.com.tr üzerinden oluşturulur.',
+    'İADE ÖZETİ (KESİN): Genel iade süresi teslimattan sonra 14 gündür; ürün kullanılmamış, etiketli ve orijinal ambalajında olmalı. İade talebi iletisim@ores.com.tr üzerinden oluşturulur; kabul edilirse iade kargo etiketi + gönderim talimatı gelir.',
+    'İADE ADRESİ (KESİN): Resmi iade adresi Sakarya 1. Organize Sanayi Bölgesi 2. Cadde No:12, 54590 Arifiye / Sakarya. Kağıthane/İstanbul merkez adresi iade adresi DEĞİLDİR.',
+    'ÖNEMSİZ GÖNDERİM (KESİN): İade talebi oluşturulmadan doğrudan gönderilen ürünler kabul edilmez. Önce talep, sonra etiket/talimat, sonra gönderim.',
+    'PARA İADESİ (KESİN — yalnızca usulüne uygun iade için): Ürün iade adresine ulaşır → incelenir → onay bildirilir → onaylanırsa 10 iş günü içinde orijinal ödeme yöntemine. Banka ek süre alabilir. Onaydan 15 iş günü geçtiyse hâlâ yoksa iletisim@ores.com.tr (+ telefon 08:00–18:00).',
     'İADE DIŞI (KESİN): İndirimdeki/kampanyalı ürünler ve hediye kartları iade edilemez.',
     'ÜRÜN DEĞİŞİMİ/TAKAS (KESİN): Doğrudan takas yok; teslim alınmış ürün için iade + yeni sipariş. Bunu kargoya çıkmamış sipariş iptaline uygulama.',
   ];
@@ -794,6 +797,18 @@ function returnPolicyHint(message: string): string {
   if (/(indirim|kampanya)/i.test(text)) {
     lines.push(
       'BU SORU İNDİRİMLİ ÜRÜN İADESİ: Cevaba "Hayır" ile başla. İndirimdeki ürün iade edilemez. "14 gün içinde iade edebilirsiniz" DEME — bu genel kural indirimli ürüne uygulanmaz.'
+    );
+  }
+
+  if (
+    /(kağıthane|kagithane|merkez adres|doğrudan gönder|direkt gönder|kargoladım|kargoladim|teslim alınmış|teslim alinmis|para iade|ne zaman.*iade|iadem ne zaman)/i.test(
+      text
+    )
+  ) {
+    lines.push(
+      'BU SORU YANLIŞ ADRES / ZATEN GÖNDERİLMİŞ İADE: Sadece genel "10 iş günü" zaman çizelgesini sanki her şey yolundaymış gibi anlatma.',
+      'Kağıthane\'ye gönderildiyse: resmi iade adresi Sakarya/Arifiye olduğunu söyle; talep+etiket olmadan gönderimin kabul edilmeyebileceğini uyar.',
+      'Hemen sipariş/takip no ile iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00) yönlendir; operasyon durumunu kontrol etsin. Kesin "paranız şu gün yatar" vaat etme.'
     );
   }
 
@@ -1254,7 +1269,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma, çocuk verisi/ebeveyn silme soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; TR iade 14 gün; ödeme kart/iyzico/havale; kapıda nakit yok; hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse. ÇOCUK VERİSİ: hizmet çocuklara yönelik değil; ebeveyn/vasi silme talep edebilir — sadece "mail atın" deme, §6.8 + e-posta/telefon ver. DAVA/TAHKİM: ölçülü dil + iletişim. Uydurma yok; Kural 12.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma, çocuk verisi/ebeveyn silme soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; TR iade 14 gün (önce talep+etiket; adres Sakarya/Arifiye — Kağıthane iade adresi değil; talepsiz gönderim kabul edilmeyebilir); para iadesi onay sonrası 10 iş günü. Ödeme kart/iyzico/havale; kapıda nakit yok; hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse. ÇOCUK VERİSİ: §6.8 + iletişim. DAVA/TAHKİM: ölçülü dil. Uydurma yok; Kural 12.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
 ${
   toolActive
