@@ -155,6 +155,36 @@ function turkishStem(word: string): string {
  * döner (örn. "afiş çerçevesi" -> ["Afiş Çerçevesi"]). Türkçe çekim ekleri
  * ("çerçeveleri", "panoları", "panosunu" vb.) için kök eşleşmesi yapılır.
  */
+/**
+ * "kaldırım panosu değil", "(pano değil)", "sadece çerçeve" gibi olumsuz /
+ * dışlama ifadelerinde kategoriyi eşleşme listesinden düşür.
+ */
+function isCategoryNegatedInMessage(message: string, category: string): boolean {
+  const text = message.toLocaleLowerCase('tr-TR');
+  const cat = category.toLocaleLowerCase('tr-TR');
+  const words = cat.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return false;
+
+  const escaped = words
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('\\s+');
+  if (new RegExp(`${escaped}[^\\n.]{0,40}\\bdeğil\\b`, 'i').test(text)) return true;
+  if (new RegExp(`\\bdeğil\\b[^\\n.]{0,40}${escaped}`, 'i').test(text)) return true;
+
+  // "sadece çerçeve" / "afiş çerçevesi ... pano değil" → kaldırım panosunu ele
+  if (/pano/i.test(cat)) {
+    if (/\bsadece\s+(afiş\s+)?çerçeve/i.test(text)) return true;
+    if (
+      /\b(afiş\s+)?çerçeve/i.test(text) &&
+      /\b(pano|kaldırım)\b[^\n.]{0,40}\bdeğil\b/i.test(text)
+    ) {
+      return true;
+    }
+    if (/\b(pano|kaldırım)\b[^\n.]{0,40}\bdeğil\b/i.test(text)) return true;
+  }
+  return false;
+}
+
 function findMentionedCategories(message: string, knownCategories: string[]): string[] {
   const normalizeWord = (word: string) =>
     word.toLocaleLowerCase('tr-TR').replace(/[^\p{L}\p{N}]/gu, '');
@@ -172,7 +202,7 @@ function findMentionedCategories(message: string, knownCategories: string[]): st
     return catStem.slice(0, stemLength) === msgStem.slice(0, stemLength);
   };
 
-  const matches = knownCategories.filter((category) => {
+  let matches = knownCategories.filter((category) => {
     const normalizedMessage = message.toLocaleLowerCase('tr-TR');
     const normalizedCategory = category.toLocaleLowerCase('tr-TR');
     if (normalizedMessage.includes(normalizedCategory)) return true;
@@ -191,6 +221,20 @@ function findMentionedCategories(message: string, knownCategories: string[]): st
       messageWords.some((msgWord) => stemMatches(catWord, msgWord))
     );
   });
+
+  matches = matches.filter((category) => !isCategoryNegatedInMessage(message, category));
+
+  // Olumlu "çerçeve" isteği varken pano kategorisini ele (olumsuzluk kaçsa bile)
+  if (matches.length > 1 && /\b(afiş\s*)?çerçeve/i.test(message)) {
+    const withoutNegationParens = message.replace(/\([^)]*değil[^)]*\)/gi, '');
+    const stillWantsPano =
+      /\bkaldırım\b/i.test(withoutNegationParens) &&
+      !isCategoryNegatedInMessage(message, 'Kaldırım Panosu');
+    if (!stillWantsPano) {
+      const frameOnly = matches.filter((c) => /çerçeve/i.test(c));
+      if (frameOnly.length > 0) matches = frameOnly;
+    }
+  }
 
   return matches.sort((a, b) => b.length - a.length);
 }
@@ -402,12 +446,59 @@ function inferSortByFromMessage(text: string): SortBy | undefined {
  */
 const PRODUCT_CARDS_PLACEHOLDER = '[[URUN_KARTLARI]]';
 
+/** Kullanıcı kartlara ek olarak metinde fiyat/stok özeti istiyor mu? */
+function wantsInlinePriceStockSummary(message: string): boolean {
+  const text = message.toLocaleLowerCase('tr-TR');
+  const asksFact = /(fiyat|stok|kaç adet|liste\s*fiyat|indirimli\s*fiyat)/i.test(text);
+  const asksWrite =
+    /(yaz|söyle|nedir|kaç|göster|her bir|adet(?:i|ini)?|fiyatını|stokunu)/i.test(text);
+  return asksFact && asksWrite;
+}
+
+/** Arama sonuçlarından kısa fiyat/stok özeti (modele + gerekirse yanıta). */
+function buildProductPriceStockSummary(
+  docs: MatchedDocument[],
+  limit = 10
+): string {
+  const products = docs
+    .filter((doc) => doc.metadata?.type === 'product')
+    .slice(0, limit);
+  if (products.length === 0) return '';
+
+  const lines = products.map((doc, index) => {
+    const title =
+      typeof doc.metadata?.title === 'string' ? doc.metadata.title : 'Ürün';
+    const price = doc.metadata?.price;
+    const listPrice = doc.metadata?.list_price;
+    const stock = doc.metadata?.stock;
+    const priceBit =
+      typeof price === 'number'
+        ? typeof listPrice === 'number' && listPrice !== price
+          ? `liste ${listPrice} TL / satış ${price} TL`
+          : `${price} TL`
+        : 'fiyat yok';
+    const stockBit = typeof stock === 'number' ? `stok ${stock}` : 'stok yok';
+    return `${index + 1}) ${title} — ${priceBit}, ${stockBit}`;
+  });
+
+  return [
+    'FİYAT/STOK ÖZETİ (KESİN — kullanıcı istedi; kısa metinde AÇIKÇA yaz, sadece karta bırakma):',
+    ...lines,
+    '',
+  ].join('\n');
+}
+
 /**
  * Kartlar gösterilecekken modelin yazdığı numaralı/madde ürün listelerini,
  * tabloları ve fiyat satırlarını temizler. Prompt kuralı 0 ihlal edilse bile
  * kullanıcıya çift liste (metin + kart) gitmesin.
+ * @param allowPriceStockSummary kullanıcı özellikle fiyat/stok yazılmasını istediyse
+ *        kısa numaralı özet satırlarını koru.
  */
-function sanitizeProductCardReply(text: string): string {
+function sanitizeProductCardReply(
+  text: string,
+  allowPriceStockSummary = false
+): string {
   const marker = '__CARDS_PLACEHOLDER__';
   const lines = text.replaceAll(PRODUCT_CARDS_PLACEHOLDER, `\n${marker}\n`).split('\n');
   const kept: string[] = [];
@@ -420,6 +511,17 @@ function sanitizeProductCardReply(text: string): string {
     }
     if (trimmed === marker) {
       kept.push(PRODUCT_CARDS_PLACEHOLDER);
+      continue;
+    }
+
+    // Kullanıcı fiyat/stok istediğinde kısa "1) ... — 420 TL, stok 25" özetine izin ver
+    if (
+      allowPriceStockSummary &&
+      /^\d+[\.\)]\s+/.test(trimmed) &&
+      /(tl|₺|stok)/i.test(trimmed) &&
+      trimmed.length < 220
+    ) {
+      kept.push(line);
       continue;
     }
 
@@ -1285,6 +1387,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    (2) DEĞİŞTİRMEDEN, tam olarak şu metin: [[URUN_KARTLARI]],
    (3) satışa ve detay soruya teşvik eden PROAKTİF bir kapanış sorusu (aşağıdaki Kapanış/CTA kuralına uy).
    Örnek: "Evet, indirimli ürünlerimiz aşağıdadır:\n\n[[URUN_KARTLARI]]\n\nListedeki ürünlerden ilgilendiğiniz veya detaylı bilgi almak istediğiniz bir model var mı?"
+   İSTİSNA — FİYAT/STOK SORULDUYSA: Kullanıcı "fiyatını/stokunu yaz/söyle" veya bağlamda "FİYAT/STOK ÖZETİ" varsa, kartlara EK olarak kısa 1-2 cümle veya kısa numaralı özet satırında fiyat ve stoğu YAZ. "Yalnızca 1 ürün var" deme; sonuç sayısı bağlama uy.
    "ÜRÜN KARTLARI HAZIR" notu verilmemişse (hiç ürün bulunamadıysa veya soru genel/belirsizse) bu kural geçerli değildir; ilgili diğer kurallara göre normal, ürünsüz bir metin cevabı ver.
 1. MÜŞTERİ HİZMETLERİ TONU VE KAPANIŞ (CTA): Yanıtına nazik bir giriş ile başla. Ürün kartları gösterildiğinde (listeleme/filtreleme sonrası) kapanışta SOĞUK/JENERİK ifadeler YASAKTIR — özellikle "Başka bir konuda yardımcı olmamı ister misiniz?" deme. Bunun yerine kullanıcıyı alışverişe ve detay sormaya teşvik eden proaktif, satış odaklı, interaktif bir soru sor. Örnek kapanışlar:
    - "Listedeki ürünlerden ilgilendiğiniz veya detaylı bilgi almak istediğiniz bir model var mı?"
@@ -1746,6 +1849,79 @@ export async function POST(req: NextRequest) {
           `${rawReply}\n\nListe fiyatı: ${listPrice} TL, indirimli fiyat: ${salePrice} TL.`.trim();
       }
     } else if (
+      // "En ucuz indirimli çerçeveyi alıp iade edebilir miyim?" — politika + ürün
+      /(indirim|kampanya)/i.test(message) &&
+      /(iade|cayma)/i.test(message)
+    ) {
+      const discRetCategories = findMentionedCategories(message, knownCategories);
+      const discRetDocs = await executeSearchProducts(supabase, knownCategories, {
+        ...(discRetCategories[0] ? { category: discRetCategories[0] } : {}),
+        on_discount_only: true,
+        sort_by: 'price_asc',
+        limit: 1,
+      });
+      const seenDiscRet = new Set<string>();
+      documents = discRetDocs.filter((doc) => {
+        const key = `${doc.metadata?.category ?? ''}|${doc.metadata?.title ?? ''}`;
+        if (seenDiscRet.has(key)) return false;
+        seenDiscRet.add(key);
+        return true;
+      });
+
+      const discRetDerived = buildDerivedPromptFields(documents, true);
+      hasProductCards = discRetDerived.hasProductCards;
+      const discRetDoc = documents[0];
+      const discRetTitle =
+        typeof discRetDoc?.metadata?.title === 'string'
+          ? discRetDoc.metadata.title
+          : 'İndirimli ürün';
+      const discRetList = discRetDoc?.metadata?.list_price;
+      const discRetSale = discRetDoc?.metadata?.price;
+      const discRetGuard =
+        documents.length > 0
+          ? [
+              '=== ZORUNLU CEVAP (İNDİRİMLİ ÜRÜN + İADE) ===',
+              `Ürün: ${discRetTitle}`,
+              typeof discRetList === 'number' && typeof discRetSale === 'number'
+                ? `Liste fiyatı: ${discRetList} TL; indirimli/satış: ${discRetSale} TL. Her iki fiyatı da metinde yaz.`
+                : 'Fiyatları bağlamdan yaz.',
+              'İADE: Hayır — indirimdeki/kampanyalı ürünler iade edilemez. "14 gün iade edebilirsiniz" DEME.',
+              '',
+            ].join('\n')
+          : 'İndirimli ürün bulunamadı; yine de genel kuralı söyle: indirimdeki ürünler iade edilemez.\n\n';
+
+      const discRetCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: buildSystemPrompt({
+              knownCategoriesText,
+              contextText: `${discRetGuard}${discRetDerived.contextText}`,
+              hasProductCards: discRetDerived.hasProductCards,
+              isAmbiguousGenericQuery: discRetDerived.isAmbiguousGenericQuery,
+              toolActive: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
+            }),
+          },
+          ...historyMessages,
+          { role: 'user', content: message },
+        ],
+        temperature: 0.2,
+      });
+
+      rawReply = discRetCompletion.choices[0].message.content ?? '';
+      if (
+        documents.length > 0 &&
+        typeof discRetList === 'number' &&
+        typeof discRetSale === 'number' &&
+        (!rawReply.includes(String(discRetList)) || !rawReply.includes(String(discRetSale)))
+      ) {
+        rawReply =
+          `${rawReply}\n\n${discRetTitle} — Liste: ${discRetList} TL, indirimli: ${discRetSale} TL. İndirimli ürünler iade edilemez.`.trim();
+      }
+    } else if (
       // "en ucuz 3 afiş çerçevesi" — ranking soruları direct-category'yi bypass
       // ettiği için tool çağrılmazsa kartsız kalabiliyor; burada zorla çek.
       findMentionedCategories(message, knownCategories).length > 0 &&
@@ -1755,31 +1931,50 @@ export async function POST(req: NextRequest) {
       const rankCategories = findMentionedCategories(message, knownCategories);
       const countMatch =
         message.match(/en (?:ucuz|pahalı|pahali|ağır|agir|hafif)\s+(\d+)/i) ||
-        message.match(/(\d+)\s*(?:adet\s+)?(?:en ucuz|en pahalı|en pahali)/i);
+        message.match(/(\d+)\s*(?:adet\s+)?(?:en ucuz|en pahalı|en pahali)/i) ||
+        message.match(/en ucuz\s+(\d+)/i);
       const requestedCount = countMatch?.[1] ? Number(countMatch[1]) : NaN;
       const wantsSingle =
         looksLikeRankingOrSingleItemQuestion(message) &&
         !(Number.isFinite(requestedCount) && requestedCount > 1);
-      const limit =
-        Number.isFinite(requestedCount) && requestedCount > 0
-          ? Math.min(requestedCount, 50)
-          : wantsSingle
-            ? 1
-            : 50;
+      const sortBy = messageFilters.sort_by ?? 'price_asc';
 
-      const rankDocs = await executeSearchProducts(supabase, knownCategories, {
+      // Beraberlik (aynı en düşük fiyat) için önce geniş çek, sonra kırp
+      let rankDocs = await executeSearchProducts(supabase, knownCategories, {
         category: rankCategories[0],
         ...messageFilters,
-        sort_by: messageFilters.sort_by ?? 'price_asc',
-        limit,
+        sort_by: sortBy,
+        limit: 50,
       });
       const seenRank = new Set<string>();
-      documents = rankDocs.filter((doc) => {
+      rankDocs = rankDocs.filter((doc) => {
         const key = `${doc.metadata?.category ?? ''}|${doc.metadata?.title ?? ''}`;
         if (seenRank.has(key)) return false;
         seenRank.add(key);
         return true;
       });
+
+      if (Number.isFinite(requestedCount) && requestedCount > 0) {
+        rankDocs = rankDocs.slice(0, Math.min(requestedCount, 50));
+      } else if (wantsSingle) {
+        if (sortBy === 'price_asc' || sortBy === 'price_desc') {
+          const prices = rankDocs
+            .map((doc) => doc.metadata?.price)
+            .filter((price): price is number => typeof price === 'number');
+          if (prices.length > 0) {
+            const target =
+              sortBy === 'price_asc' ? Math.min(...prices) : Math.max(...prices);
+            const tied = rankDocs.filter((doc) => doc.metadata?.price === target);
+            rankDocs = tied.length > 0 ? tied : rankDocs.slice(0, 1);
+          } else {
+            rankDocs = rankDocs.slice(0, 1);
+          }
+        } else {
+          rankDocs = rankDocs.slice(0, 1);
+        }
+      }
+
+      documents = rankDocs;
 
       const rankDerived = buildDerivedPromptFields(documents, true);
       hasProductCards = rankDerived.hasProductCards;
@@ -1790,7 +1985,14 @@ export async function POST(req: NextRequest) {
       const countGuard =
         Number.isFinite(requestedCount) && requestedCount > 0
           ? `ÖNEMLİ: Kullanıcı ${requestedCount} ürün istedi; sonuçta ${documents.length} ürün var. Kural 10'a uy.\n\n`
-          : '';
+          : wantsSingle && documents.length > 1
+            ? `ÖNEMLİ: En ucuz/pahalı değerde ${documents.length} ürün BERABERE. "Yalnızca 1 ürün var" DEME; berabere ürünleri belirt.\n\n`
+            : wantsSingle
+              ? 'ÖNEMLİ: Bu, sıralama sonucundaki birincil üründür. Filtreye uyan başka ürün yokmuş gibi "kategoride yalnızca 1 ürün" DEME (bilmiyorsan söyleme).\n\n'
+              : '';
+      const priceStockGuard = wantsInlinePriceStockSummary(message)
+        ? buildProductPriceStockSummary(documents)
+        : '';
 
       const rankCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
@@ -1799,7 +2001,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: `${countGuard}${rankGuard}${rankDerived.contextText}`,
+              contextText: `${countGuard}${priceStockGuard}${rankGuard}${rankDerived.contextText}`,
               hasProductCards: rankDerived.hasProductCards,
               isAmbiguousGenericQuery: rankDerived.isAmbiguousGenericQuery,
               toolActive: true,
@@ -1814,6 +2016,73 @@ export async function POST(req: NextRequest) {
       });
 
       rawReply = rankCompletion.choices[0].message.content ?? '';
+      if (priceStockGuard && !/\d+\s*tl/i.test(rawReply)) {
+        const compact = buildProductPriceStockSummary(documents)
+          .replace(/^FİYAT\/STOK ÖZETİ[^\n]*\n/, '')
+          .trim();
+        if (compact) {
+          rawReply = `${rawReply}\n\n${compact}`.trim();
+        }
+      }
+    } else if (
+      // "1000 TL altı B2" — ranking yoksa bile zorunlu filtreli çoklu arama
+      (messageFilters.dimension ||
+        messageFilters.max_price != null ||
+        messageFilters.min_price != null ||
+        messageFilters.color) &&
+      !messageFilters.out_of_stock_only
+    ) {
+      const filterCategories = findMentionedCategories(message, knownCategories);
+      const filterDocs = await executeSearchProducts(supabase, knownCategories, {
+        ...(filterCategories[0] ? { category: filterCategories[0] } : {}),
+        ...messageFilters,
+        sort_by: messageFilters.sort_by ?? 'price_asc',
+        limit: 50,
+      });
+      const seenFilter = new Set<string>();
+      documents = filterDocs.filter((doc) => {
+        const key = `${doc.metadata?.category ?? ''}|${doc.metadata?.title ?? ''}`;
+        if (seenFilter.has(key)) return false;
+        seenFilter.add(key);
+        return true;
+      });
+
+      const filterDerived = buildDerivedPromptFields(documents, true);
+      hasProductCards = filterDerived.hasProductCards;
+      const filterGuard = emptySearchGuard(documents, {
+        ...messageFilters,
+        category: filterCategories[0],
+      });
+      const priceStockGuard = wantsInlinePriceStockSummary(message)
+        ? buildProductPriceStockSummary(documents)
+        : '';
+      const multiGuard =
+        documents.length > 1
+          ? `ÖNEMLİ: Filtreye uyan ${documents.length} ürün var; "yalnızca 1 ürün" DEME.\n\n`
+          : '';
+
+      const filterCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: buildSystemPrompt({
+              knownCategoriesText,
+              contextText: `${multiGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
+              hasProductCards: filterDerived.hasProductCards,
+              isAmbiguousGenericQuery: filterDerived.isAmbiguousGenericQuery,
+              toolActive: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
+            }),
+          },
+          ...historyMessages,
+          { role: 'user', content: message },
+        ],
+        temperature: 0.2,
+      });
+
+      rawReply = filterCompletion.choices[0].message.content ?? '';
     } else if (directCategoryMatches.length > 0) {
       const categoryResultDocs: MatchedDocument[] = [];
       for (const category of directCategoryMatches) {
@@ -1937,6 +2206,21 @@ export async function POST(req: NextRequest) {
             sort_by: args.sort_by || messageFilters.sort_by,
           };
 
+          // Bütçe/ölçü listesinde model limit=1 gönderirse tüm eşleşmeleri kaçırma
+          // (tekil "hangisi/en ağır" hariç).
+          const wantsSingleTool =
+            looksLikeRankingOrSingleItemQuestion(message) &&
+            !/en (?:ucuz|pahalı|pahali|ağır|agir|hafif)\s+\d+/i.test(message);
+          if (
+            !wantsSingleTool &&
+            (mergedArgs.dimension ||
+              mergedArgs.max_price != null ||
+              mergedArgs.min_price != null) &&
+            (mergedArgs.limit == null || mergedArgs.limit <= 1)
+          ) {
+            mergedArgs.limit = 50;
+          }
+
           const results =
             toolCall.function.name === 'search_products'
               ? await executeSearchProducts(supabase, knownCategories, mergedArgs)
@@ -2034,9 +2318,30 @@ export async function POST(req: NextRequest) {
       : rawReply.replaceAll(PRODUCT_CARDS_PLACEHOLDER, '');
 
     // Model yine de 1-2-3 ürün listesi yazarsa sunucuda temizle (kart + metin tekrarı olmasın).
-    const reply = hasProductCards
-      ? sanitizeProductCardReply(replyWithPlaceholder)
+    // Kullanıcı özellikle fiyat/stok istediyse kısa özet satırlarına izin ver.
+    const allowPriceStockSummary = wantsInlinePriceStockSummary(message);
+    let reply = hasProductCards
+      ? sanitizeProductCardReply(replyWithPlaceholder, allowPriceStockSummary)
       : replyWithPlaceholder;
+
+    if (
+      hasProductCards &&
+      allowPriceStockSummary &&
+      documents.some((doc) => doc.metadata?.type === 'product') &&
+      !/\d+\s*tl/i.test(reply)
+    ) {
+      const compact = buildProductPriceStockSummary(documents)
+        .replace(/^FİYAT\/STOK ÖZETİ[^\n]*\n/, '')
+        .trim();
+      if (compact) {
+        reply = reply.includes(PRODUCT_CARDS_PLACEHOLDER)
+          ? reply.replace(
+              PRODUCT_CARDS_PLACEHOLDER,
+              `${compact}\n\n${PRODUCT_CARDS_PLACEHOLDER}`
+            )
+          : `${reply}\n\n${compact}`;
+      }
+    }
 
     // 5. Sohbeti ve mesajları kalıcı olarak sakla.
     const conversationResult = await ensureConversation(
