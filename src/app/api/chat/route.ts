@@ -81,9 +81,10 @@ async function getKnownCategories(
 // TETİKLEMEMELİYİZ ki gerçek politika soruları normal şekilde cevaplanabilsin.
 const POLICY_KEYWORDS = [
   'iade', 'degisim', 'değişim', 'kargo', 'teslimat', 'garanti', 'gizlilik',
-  'cerez', 'çerez', 'odeme', 'ödeme', 'fatura', 'iletisim', 'iletişim',
-  'sikayet', 'şikayet', 'sozlesme', 'sözleşme', 'tahkim', 'sms', 'politika',
-  'hasarli', 'hasarlı', 'kusurlu', 'yasal',
+  'cerez', 'çerez', 'odeme', 'ödeme', 'fatura', 'e-fatura', 'efatura',
+  'kdv', 'vkn', 'vergi', 'kurumsal', 'iyzico', 'havale', 'eft', 'taksit',
+  'iletisim', 'iletişim', 'sikayet', 'şikayet', 'sozlesme', 'sözleşme',
+  'tahkim', 'sms', 'politika', 'hasarli', 'hasarlı', 'kusurlu', 'yasal',
 ];
 
 function looksLikePolicyQuestion(text: string): boolean {
@@ -279,7 +280,14 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
       text
     );
 
-  if (
+  // "Stokta olmayan en ucuz..." → out_of_stock; purchaseIntent burada in_stock
+  // zorlamamalı (aksi halde stok=0 ürünler hiç bulunamaz).
+  if (wantsOutOfStockProducts(message)) {
+    filters.out_of_stock_only = true;
+    if (/(en ucuz|en uygun fiyat|ucuz)/i.test(text)) {
+      filters.sort_by = 'price_asc';
+    }
+  } else if (
     /(stokta olan|stoktakiler|stokta var|sadece stok|stokta olanlar)/i.test(text) ||
     purchaseIntent ||
     // Bütçe sorusu genelde "ne alabilirim" anlamına gelir → stoksuz gösterme
@@ -288,7 +296,11 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     filters.in_stock_only = true;
   }
 
-  if (/(indirimli|indirimde|kampanyalı|kampanyada|kampanya)/i.test(text)) {
+  // "İndirimdeki ürünü iade edebilir miyim?" → politika; indirimli ürün araması değil
+  if (
+    /(indirimli|indirimde|kampanyalı|kampanyada|kampanya|indirimdeki)/i.test(text) &&
+    !/(iade|cayma|değişim|degisim)/i.test(text)
+  ) {
     filters.on_discount_only = true;
   }
 
@@ -323,7 +335,53 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     filters.sort_by = 'price_asc';
   }
 
+  if (filters.sort_by == null) {
+    filters.sort_by = inferSortByFromMessage(text);
+  }
+
   return filters;
+}
+
+/**
+ * "En ağır hangisi ve en ucuz mu?" gibi karma sorularda birincil sıralama
+ * niteliğini seçer. "en ucuz mu?" karşılaştırması price_asc'e EZMEZ.
+ */
+function inferSortByFromMessage(text: string): SortBy | undefined {
+  // "en ucuz mu?" / "en ucuz çerçeve mi?" — sıralama değil karşılaştırma
+  const cheapCompareOnly = /\ben ucuz\b[\s\S]{0,40}\b(mu|mü|mi|mı)\b/i.test(text);
+  const expensiveCompareOnly = /\ben pahal[ıi]\b[\s\S]{0,40}\b(mu|mü|mi|mı)\b/i.test(text);
+
+  const whichHeavy =
+    /(en ağır|en agir)\b[\s\S]{0,80}\b(hangisi|nedir|kilosu|\bkg\b)/i.test(text) ||
+    /\b(hangisi|nedir)\b[\s\S]{0,80}\b(en ağır|en agir)\b/i.test(text);
+  const whichLight =
+    /\ben hafif\b[\s\S]{0,80}\b(hangisi|nedir)\b/i.test(text) ||
+    /\b(hangisi|nedir)\b[\s\S]{0,80}\ben hafif\b/i.test(text);
+  const whichExpensive =
+    /(en pahalı|en pahali)\b[\s\S]{0,80}\b(hangisi|nedir)/i.test(text) ||
+    /\b(hangisi|nedir)\b[\s\S]{0,80}\b(en pahalı|en pahali)\b/i.test(text);
+  const whichCheap =
+    /\ben ucuz\b[\s\S]{0,80}\b(hangisi|nedir|olan|ürün|çerçeve|pano|indirimli)/i.test(
+      text
+    ) || /\b(hangisi|nedir)\b[\s\S]{0,80}\ben ucuz\b/i.test(text);
+
+  // Birincil soru ağırlıksa (veya "en ağır ... en ucuz mu?") weight kazanır
+  if (whichHeavy || (/(en ağır|en agir)/i.test(text) && cheapCompareOnly)) {
+    return 'weight_desc';
+  }
+  if (whichLight) return 'weight_asc';
+  if (whichExpensive && !expensiveCompareOnly) return 'price_desc';
+  if (whichCheap && !cheapCompareOnly) return 'price_asc';
+
+  if (/(en pahalı|en pahali)/i.test(text) && !/(en ağır|en agir|en hafif)/i.test(text)) {
+    return 'price_desc';
+  }
+  if (/\ben ucuz\b|\ben uygun\b/i.test(text) && !/(en ağır|en agir|en hafif)/i.test(text)) {
+    return 'price_asc';
+  }
+  if (/(en ağır|en agir)/i.test(text)) return 'weight_desc';
+  if (/\ben hafif\b/i.test(text)) return 'weight_asc';
+  return undefined;
 }
 
 /**
@@ -530,12 +588,203 @@ interface SearchProductsArgs {
   max_price?: number;
   min_price?: number;
   in_stock_only?: boolean;
+  /** true → yalnızca stok == 0 ürünler (stokta olmayanlar) */
+  out_of_stock_only?: boolean;
   on_discount_only?: boolean;
   dimension?: string;
   color?: string;
   query_text?: string;
   sort_by?: SortBy;
   limit?: number;
+}
+
+const FREE_SHIPPING_THRESHOLD_TL = 750;
+
+function wantsOutOfStockProducts(message: string): boolean {
+  return /(stokta olmayan|stokta olmayanlar|stokta yok|stoksuz|stok dışı|stokta bulunmayan|tükenen|bitmiş stok)/i.test(
+    message
+  );
+}
+
+/**
+ * Mesajdan kargo karşılaştırması için sepet tutarını çıkarır.
+ * "2 adet" gibi miktarları TL sanmaz; "720 TL" / "sepetim 720" tercih eder.
+ */
+function extractExplicitCartAmountTl(message: string): number | null {
+  const text = message.toLocaleLowerCase('tr-TR');
+
+  const withCurrency = [
+    ...text.matchAll(/(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)\b/gi),
+  ]
+    .map((m) => Number(m[1].replace(',', '.')))
+    .filter((n) => Number.isFinite(n) && n >= 50);
+
+  if (withCurrency.length > 0) {
+    return Math.max(...withCurrency);
+  }
+
+  const sepetMatch = text.match(
+    /(?:sepet(?:im|in|i)?|tutar(?:ı|i)?|toplam(?:ı|i)?)\s*(?:tam\s*)?(\d+(?:[.,]\d+)?)/i
+  );
+  if (sepetMatch?.[1]) {
+    const amount = Number(sepetMatch[1].replace(',', '.'));
+    if (Number.isFinite(amount) && amount >= 50) return amount;
+  }
+
+  return null;
+}
+
+/**
+ * Kargo ücretsiz eşiğiyle ilgili sorularda modele kesin aritmetik ipucu verir;
+ * "720 TL ücretsiz mi?" gibi sorularda Evet/Hayır çelişkisini engeller.
+ */
+function shippingThresholdHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  if (!/(kargo|ücretsiz kargo|ucretsiz kargo|kargo ücretsiz|kargo ucretsiz)/i.test(text)) {
+    return '';
+  }
+
+  const amount = extractExplicitCartAmountTl(message);
+  let comparison = '';
+  if (amount != null) {
+    comparison =
+      amount >= FREE_SHIPPING_THRESHOLD_TL
+        ? `Kullanıcının tutarı ${amount} TL ≥ ${FREE_SHIPPING_THRESHOLD_TL} → kargo ÜCRETSİZ. Cevaba "Evet" ile başla; sonra kuralı açıkla.`
+        : `Kullanıcının tutarı ${amount} TL < ${FREE_SHIPPING_THRESHOLD_TL} → kargo ÜCRETSİZ DEĞİL. Cevaba "Hayır" ile başla; "ücretsiz olur" DEME. Eşik ${FREE_SHIPPING_THRESHOLD_TL} TL'dir.`;
+  } else if (/(\d+)\s*adet/i.test(text)) {
+    comparison =
+      'NOT: Mesajda adet var ama açık TL tutarı yok. Birim fiyat × adet toplamını BAĞLAMDAKİ ürün fiyatından hesapla; "2 adet"i 2 TL sanma. Toplam ≥ 750 → ücretsiz, değilse değil.';
+  }
+
+  return [
+    `KARGO ÜCRETSİZ EŞİĞİ (KESİN): ${FREE_SHIPPING_THRESHOLD_TL} TL ve üzeri siparişlerde kargo ücretsiz; altındaki siparişlerde kargo ücretli (alıcıya aittir).`,
+    comparison,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
+ * "En ucuz A4'ten 2 adet alırsam kargo ücretsiz mi?" → birim fiyatı DB'den alıp
+ * sepet toplamını kesin hesaplar.
+ */
+async function shippingQuantityCartHint(
+  message: string,
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  knownCategories: string[]
+): Promise<string> {
+  if (!/(kargo|ücretsiz)/i.test(message)) return '';
+  const qtyMatch = message.match(/(\d+)\s*adet/i);
+  if (!qtyMatch?.[1]) return '';
+  // Açık TL tutarı varsa miktar×fiyat hesabına gerek yok
+  if (extractExplicitCartAmountTl(message) != null) return '';
+
+  const qty = Number(qtyMatch[1]);
+  if (!Number.isFinite(qty) || qty <= 0 || qty > 500) return '';
+
+  const filters = extractSearchFiltersFromMessage(message);
+  const categories = findMentionedCategories(message, knownCategories);
+  const docs = await executeSearchProducts(supabase, knownCategories, {
+    ...(categories[0] ? { category: categories[0] } : {}),
+    dimension: filters.dimension,
+    color: filters.color,
+    in_stock_only: true,
+    sort_by: filters.sort_by ?? 'price_asc',
+    limit: 1,
+  });
+
+  const unit = docs[0]?.metadata?.price;
+  const title = typeof docs[0]?.metadata?.title === 'string' ? docs[0].metadata.title : 'ürün';
+  if (typeof unit !== 'number' || !Number.isFinite(unit) || unit <= 0) {
+    return '';
+  }
+
+  const total = Math.round(unit * qty * 100) / 100;
+  const free = total >= FREE_SHIPPING_THRESHOLD_TL;
+  return [
+    `SEPET HESABI (KESİN — KARGO): "${title}" birim fiyat ${unit} TL × ${qty} adet = ${total} TL.`,
+    free
+      ? `${total} TL ≥ ${FREE_SHIPPING_THRESHOLD_TL} TL → kargo ÜCRETSİZ. Cevaba "Evet" ile başla.`
+      : `${total} TL < ${FREE_SHIPPING_THRESHOLD_TL} TL → kargo ÜCRETSİZ DEĞİL. Cevaba "Hayır" ile başla.`,
+    'Adet sayısını (örn. 2) asla TL tutarı gibi kullanma.',
+  ].join('\n');
+}
+
+/**
+ * Belgede net yazmayan baskı/kurumsal fatura sorularında uydurma "mümkün/yapıyoruz"
+ * cevaplarını engellemek için bağlam ipucu.
+ */
+function undocumentedCheckoutHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  const asksPrint = /(baskı|basım|tasarım|hazır.*gönder|afiş.*yap)/i.test(text);
+  const asksCorpInvoice =
+    /(kurumsal|kdv|vkn|e-fatura|efatura|şahıs kart|sahis kart|fatura)/i.test(text);
+  if (!asksPrint && !asksCorpInvoice) return '';
+
+  const lines = [
+    'BELGEDE NET OLMAYAN HİZMET/FATURA (KESİN): Aşağıdaki noktalar politika/katalog metninde ayrıntılı geçmiyorsa "yapıyoruz / yapmıyoruz / mümkün / mümkün değil" diye KESİN iddia UYDURMA.',
+  ];
+  if (asksPrint) {
+    lines.push(
+      'Afiş baskı/tasarım: "Kataloğumuzda/politika metninde afiş baskı hizmeti geçmiyor" de; teyit için iletişim bilgilerini ver. "Hazır göndermelisiniz" diye kesin zorunluluk uydurma.'
+    );
+  }
+  if (asksCorpInvoice) {
+    lines.push(
+      'Şahıs kartı + kurumsal KDV/e-fatura: Bilinen ödeme yöntemlerini (Visa, Mastercard, iyzico, havale/EFT) söyle; kurumsal fatura detayı belgede yoksa "bu detay belgelerimizde geçmiyor, teyit için iletişime geçin" de. "Mümkün / alabilirsiniz" UYDURMA.'
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * İade sorularında özellikle indirimli ürün istisnasını modele dayatır.
+ * (Politika: indirimdeki ürünler iade kapsamı dışındadır.)
+ */
+function returnPolicyHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  if (!/iade|cayma|değişim|degisim/.test(text)) return '';
+
+  const lines = [
+    'İADE ÖZETİ (KESİN): Genel iade süresi teslimattan sonra 14 gündür; ürün kullanılmamış, etiketli ve orijinal ambalajında olmalı. İade talebi iletisim@ores.com.tr üzerinden oluşturulur.',
+    'İADE DIŞI (KESİN): İndirimdeki/kampanyalı ürünler ve hediye kartları iade edilemez.',
+  ];
+
+  if (/(indirim|kampanya)/i.test(text)) {
+    lines.push(
+      'BU SORU İNDİRİMLİ ÜRÜN İADESİ: Cevaba "Hayır" ile başla. İndirimdeki ürün iade edilemez. "14 gün içinde iade edebilirsiniz" DEME — bu genel kural indirimli ürüne uygulanmaz.'
+    );
+  }
+
+  return lines.join('\n');
+}
+
+function withPolicyHints(message: string, contextText: string): string {
+  const hints = [
+    shippingThresholdHint(message),
+    undocumentedCheckoutHint(message),
+    returnPolicyHint(message),
+  ].filter(Boolean);
+  if (hints.length === 0) return contextText;
+  return `${hints.join('\n\n')}\n\n${contextText}`;
+}
+
+/** Filtreli arama 0 sonuç döndüğünde modelin "1 ürün var" uydurmasını engeller. */
+function emptySearchGuard(
+  docs: MatchedDocument[],
+  filters: Partial<SearchProductsArgs>
+): string {
+  if (docs.length > 0) return '';
+  const bits: string[] = [];
+  if (filters.max_price != null) bits.push(`bütçe ≤ ${filters.max_price} TL`);
+  if (filters.min_price != null) bits.push(`fiyat ≥ ${filters.min_price} TL`);
+  if (filters.in_stock_only) bits.push('stok > 0');
+  if (filters.out_of_stock_only) bits.push('stok = 0');
+  if (filters.on_discount_only) bits.push('yalnızca indirimli');
+  if (filters.dimension) bits.push(`ölçü ${filters.dimension}`);
+  if (filters.category) bits.push(`kategori ${filters.category}`);
+  const criteria = bits.length > 0 ? bits.join(', ') : 'verilen kriterler';
+  return `ÖNEMLİ (BOŞ ARAMA): Bu filtrelerle (${criteria}) 0 ürün bulundu. ASLA "1 ürün var / yalnızca N ürün" diye uydurma. Kibarca bu kritere uyan ürün olmadığını söyle; gerekirse filtreyi gevşetmeyi (bütçe/stok) veya diğer kategoriyi öner.\n\n`;
 }
 
 function buildSearchProductsTool(knownCategoriesText: string): ChatCompletionTool {
@@ -563,7 +812,13 @@ function buildSearchProductsTool(knownCategoriesText: string): ChatCompletionToo
           },
           in_stock_only: {
             type: 'boolean',
-            description: 'true ise sadece stokta olan (stok > 0) ürünler döner. Kullanıcı "stokta olanlar" gibi bir şey söylemediyse belirtme/false bırak.',
+            description:
+              'true ise sadece stokta olan (stok > 0) ürünler döner. Kullanıcı "stokta olanlar" dediyse true. "Stokta olmayan" sorduğunda BUNU true yapma; out_of_stock_only kullan.',
+          },
+          out_of_stock_only: {
+            type: 'boolean',
+            description:
+              'true ise sadece stokta OLMAYAN (stok = 0) ürünler döner. Kullanıcı "stokta olmayan", "stoksuz", "stokta yok olan" dediğinde MUTLAKA true ver; in_stock_only ile birlikte kullanma.',
           },
           on_discount_only: {
             type: 'boolean',
@@ -631,7 +886,9 @@ async function executeSearchProducts(
   if (typeof args.min_price === 'number' && Number.isFinite(args.min_price)) {
     query = query.filter('metadata->price', 'gte', args.min_price);
   }
-  if (args.in_stock_only) {
+  if (args.out_of_stock_only) {
+    query = query.filter('metadata->stock', 'eq', 0);
+  } else if (args.in_stock_only) {
     query = query.filter('metadata->stock', 'gt', 0);
   }
   if (args.on_discount_only) {
@@ -708,6 +965,10 @@ interface BuildSystemPromptParams {
   isAmbiguousGenericQuery: boolean;
   toolActive: boolean;
   pinnedFollowUpProduct?: boolean;
+  /** Kargo eşiği vb. politika ipuçları için ham kullanıcı mesajı */
+  userMessage?: string;
+  /** DB'den hesaplanan sepet/kargo gibi kesin önekler */
+  extraContextPrefix?: string;
 }
 
 function buildSystemPrompt({
@@ -717,7 +978,13 @@ function buildSystemPrompt({
   isAmbiguousGenericQuery,
   toolActive,
   pinnedFollowUpProduct = false,
+  userMessage = '',
+  extraContextPrefix = '',
 }: BuildSystemPromptParams): string {
+  const hinted = withPolicyHints(userMessage, contextText);
+  const contextWithHints = extraContextPrefix
+    ? `${extraContextPrefix}\n\n${hinted}`
+    : hinted;
   return `Sen Ores.com.tr e-ticaret platformunun profesyonel, kibar ve çözüm odaklı AI Müşteri Danışmanısın.
 
 GÖREVİN:
@@ -726,13 +993,23 @@ Kullanıcının sorularına sana verilen bağlamı (context) ve gerektiğinde se
 KAPSAM (ÇOK ÖNEMLİ — ASLA İHLAL ETME):
 Sen YALNIZCA Ores.com.tr müşteri danışmanısın. Yanıt verebileceğin konular SADECE şunlardır:
 - Mağaza ürünleri (afiş çerçevesi, kaldırım panosu vb.), fiyat, stok, ölçü, malzeme, ağırlık, indirim, sipariş yönlendirme
+- Ürünle ilişkili hizmet/sipariş soruları: özel ölçü, özel üretim, ışıklı stand, afiş baskısı/tasarım, montaj, toptan/kurumsal alım — KAPSAM İÇİDİR; "yardımcı olamıyorum" diye REDDETME
 - Kurumsal politikalar (iade, kargo, garanti, iletişim, gizlilik vb.)
+- Ödeme ve faturalama (kabul edilen kartlar, iyzico, havale/EFT, şahıs/kurumsal fatura, KDV/VKN, e-fatura soruları) — bunlar KAPSAM İÇİDİR; "yardımcı olamıyorum" diye REDDETME
 - Selamlaşma / sohbet nezaketi (kısa) ve ardından ürün/politika yardımına yönlendirme
-KAPSAM DIŞI olan her şey (ünlüler, spor, genel kültür, siyaset, hava durumu, ödev, kod yazma, diğer markalar, kişisel tavsiye vb.) için kendi genel bilginle ASLA cevap verme. Bunun yerine kibarca reddet ve ORES ürün/politika konularına yönlendir.
-Örnek: Kullanıcı "Mauro Icardi nerelidir?" derse → "Bu konuda yardımcı olamıyorum; ben Ores.com.tr ürün ve politikaları hakkında destek veriyorum. Afiş çerçevesi, kaldırım panosu veya iade/kargo gibi bir konuda yardımcı olabilir miyim?" gibi yanıt ver. Futbolcu biyografisi YAZMA.
+KAPSAM DIŞI yalnızca ORES alışverişi/ürün/politika ile İLGİSİZ konular (ünlüler, spor, genel kültür, siyaset, hava durumu, ödev, kod yazma, diğer markalar, kişisel tavsiye vb.). Bunlar için kibarca reddet.
+ÖNEMLİ AYIRIM: Kullanıcı çerçeve/pano/sipariş/ödeme/fatura/baskı/ölçü hakkında soruyorsa bu HER ZAMAN kapsam içidir — tüm mesajı Icardi red şablonuyla kapatma. Red yalnızca mesaj TAMAMEN alakasızsa.
+KARMA SORU (ÇOK ÖNEMLİ): Mesaj hem ORES ürünü (çerçeve/ölçü/afiş) hem kapsam dışı (futbolcu/ünlü) içeriyorsa TÜMÜNÜ reddetme. Ürün kısmını cevapla; kapsam dışı kısmı tek cümlede geç (örn. "Sporcu/biyografi bilgisi veremem.").
+SIRALAMA ÖNCELİĞİ: "En ağır hangisi ve en ucuz mu?" → önce en ağırı (kg) bul; "en ucuz mu?" sadece Evet/Hayır karşılaştırmasıdır, sıralamayı fiyata ÇEVİRME. AĞIRLIK ≠ FİYAT.
+Örnek KAPSAM DIŞI (saf): Kullanıcı sadece "Mauro Icardi nerelidir?" derse → kibarca reddet; futbolcu biyografisi YAZMA.
+Örnek KARMA: "Galatasaray afişi için hangi ölçü uygun ve Icardi hangi takımda?" → çerçeve ölçülerini/kategoriyi öner; Icardi sorusuna cevap VERME ("sporcu bilgisi veremem").
+Örnek KAPSAM İÇİ (ödeme): "şahıs kartı + kurumsal fatura / e-fatura" → reddetme; belgede varsa söyle, yoksa uydurma, Kural 12 iletişim ver.
+Örnek KAPSAM İÇİ (özel ölçü): "120x240 ışıklı stand" → reddetme; katalogda yoksa söyle; "üretiriz/üretmeyiz" uydurma; iletişim ver.
+Örnek KAPSAM İÇİ (baskı): "afiş baskısı yapıyor musunuz?" → reddetme. Belgede hizmet yoksa: "Kataloğumuzda/politika metninde afiş baskı hizmeti geçmiyor" de. "Yapıyoruz / yapmıyoruz / mümkün" diye KESİN iddia UYDURMA; teyit için Kural 12 iletişim ver.
+ÇİFT İSTEK: "Sizde X var mı? Yoksa en ucuz 3 çerçeveyi göster" → Önce X katalog kategorilerinde yoksa bunu söyle (iPhone kılıfı/mouse pad vb. YOK); sonra ikinci istek için search_products ile çerçeveleri getir. İlk soruyu yok sayma.
 
 ARAÇ (TOOL) KULLANIMI (ÇOK ÖNEMLİ):
-Kullanıcı bir fiyat filtresi ("500 TL altı", "1000 TL üzeri"), bir SIRALAMA/ÜSTÜNLÜK sorusu ("en ucuz", "en pahalı", "en ağır", "en hafif", "en çok stokta olan"), stok durumu ("stokta olanlar") veya kesin bir kategori/ürün adı sorduğunda search_products fonksiyonunu çağır; bu filtrelemeyi/sıralamayı bağlamdaki metne bakarak KENDİN yapmaya ÇALIŞMA (uzun listelerde satır/ürün atlayabilir veya AĞIRLIK ile FİYATI karıştırabilirsin - bunlar ayrı alanlardır). Fonksiyon sonucu veritabanından %100 doğru gelir, sen sadece bu sonucu kurallara uygun şekilde sunmaktan sorumlusun. Kullanıcı "en ağır/en pahalı ürün HANGİSİ" gibi TEK bir ürünü hedefliyorsa search_products'ı limit=1 ile çağır ki sonuçta ve dolayısıyla kartlarda SADECE o 1 ürün görünsün. Kullanıcı politika/iletişim/genel bir soru sorduysa (aşağıdaki BAĞLAM BİLGİLERİ zaten yeterliyse) aracı çağırmana gerek yok.
+Kullanıcı fiyat filtresi, SIRALAMA ("en ucuz"/"en ağır"), stok durumu ("stokta olanlar" VEYA "stokta olmayanlar"), indirim veya kategori/ürün adı sorduğunda search_products çağır. "Stokta olmayan en ucuz çerçeve" için out_of_stock_only=true, sort_by=price_asc, ilgili category, gerekirse limit=1. Bu filtrelemeyi kendin yapma. Tek ürün sorularında limit=1. Politika/iletişim sorusunda araç gerekmeyebilir.
 
 FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
 0. ÜRÜN VERİSİNİ SADECE KART BİLEŞENİYLE SUN, ASLA TABLO/LİSTE YAZMA (EN ÖNEMLİ KURAL): Aşağıda "ÜRÜN KARTLARI HAZIR" notu verilmişse, bağlamdaki (arama sonucundaki) TÜM ürünler arayüzde otomatik olarak şık, kaydırılabilir kartlar (carousel) halinde cevabına yerleştirilecektir. Bu yüzden cevap METNİNDE ürün detaylarını ASLA tekrarlama:
@@ -752,9 +1029,10 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - "İhtiyacınıza en uygun olan boyutu seçmek için detaylarını incelememizi ister misiniz?"
    - "Bu modellerden hangisini daha yakından inceleyelim veya satın alma linkini paylaşayım?"
    Kart/ürün listesi YOKSA (politika, iletişim, genel yönlendirme vb.) kibar genel bir kapanış kullanabilirsin.
-2. STOKTA OLMAYANLARI GİZLEME: search_products sonucunda/bağlamda bir ürün varsa (stok 0 dahi olsa) bu ürün otomatik olarak kartlarda (stok durumu açıkça "Stokta yok" olarak) gösterilir; sen bunu görmezden gelip "bu kategoride ürün yok" DEME. "Ürün yok" cevabı SADECE o kategoriyle ilgili hiçbir ürün dokümanı/kartı yoksa verilir.
+2. STOKTA OLMAYANLARI GİZLEME / STOK=0 SORULARI: search_products sonucunda stok 0 ürün varsa kartlarda "Stokta yok" olarak gösterilir; "stokta olmayan ürün yok" diye yalan söyleme. Kullanıcı "stokta olmayan en ucuz..." sorduğunda araç sonucundaki stok=0 ürünü göster. Stok 0 ise anında sipariş onaylama; "şu an stokta yok" de, stoktakilere veya iletişime yönlendir.
 3. HAFIZAYI KORU VE ÜRÜN DETAYI (ÇOK ÖNEMLİ): Kullanıcı "evet", "tamam", "sipariş ver", "bu ürün hakkında bilgi", "gösterdiğin ürünün detayı" gibi onay/takip yanıtları verdiğinde, sohbet geçmişindeki en son konuşulan ürünü hatırla ve BAĞLAM BİLGİLERİ'ndeki o ürünün TAM içeriğini (açıklama, malzeme, ölçü, ağırlık, fiyat, stok, kullanım alanı vb.) kullanarak kibar, akıcı bir metinle cevap ver. ASLA "yalnızca ürün listesine erişebiliyorum", "detay veremiyorum", "sadece liste gösterebiliyorum" deme — bağlamda ürün bilgisi varsa DETAY VER. Sadece siteye link atıp geçiştirme; önce bağlamdaki bilgileri özetle, sonra isterse satın alma linkini ekle. Kapanışta yine proaktif sor (stok/sipariş/benzer model).
 4. ASLA ÜRÜN İCAT ETME (EN ÖNEMLİ KURAL): Yalnızca aşağıdaki "BAĞLAM BİLGİLERİ" bölümünde (veya search_products sonucunda) ADI GEÇEN ürünleri, fiyatları, modelleri ve özellikleri kullan. Kendi genel bilgine veya tahminine dayanarak ASLA yeni bir ürün adı, model, fiyat veya kategori üretme/uydurma. Bağlamda/arama sonucunda kullanıcının istediği kritere uyan HİÇBİR ürün yoksa, bunu asla gizleme; kullanıcıya nazikçe bu kritere uyan bir ürün bulunmadığını söyle.
+   ÖZEL ÖLÇÜ / ÖZEL ÜRETİM / BASKI / KATALOGDIŞI HİZMET: Kullanıcı standart dışı ölçü, ışıklı stand, baskı/tasarım, kurumsal fatura detayı sorduğunda ASLA kapsam dışı red verme. Bağlamda net yazmıyorsa: (1) "belgelerimizde/kataloğumuzda bu detay geçmiyor" de, (2) bilinen ürün/ölçüye değin (uydurma ekleme), (3) Kural 12 iletişim paylaş. YASAK uydurma kalıplar: "yapıyoruz", "yapmıyoruz", "mümkün", "mümkün değil", "mevcut değil" (belgede açıkça yoksa).
 5. SADECE GERÇEK KATEGORİLERİ ÖNER: Aşağıdaki "KATALOĞUMUZDAKI GERÇEK KATEGORİLER" listesi, mağazamızda satılan TÜM kategorilerin kesin listesidir. Bir ürün/kategori bulunamadığında kullanıcıya alternatif önerirken SADECE bu listede yer alan kategori adlarını kullan. Bu listede olmayan bir kategori adını ("dekoratif ürünler", "mobilya", "ev eşyaları" gibi) ASLA var mış gibi öneri olarak söyleme; böyle bir şey söylersen ve kullanıcı onu sorarsa kendi kendinle çelişirsin. Listede tek bir kategori varsa, direkt o kategoriyi öner.
 6. SİPARİŞ YÖNLENDİRME KURALI: Kullanıcı "sipariş etmek istiyorum", "satın al", "ekle" veya benzeri bir satın alma talebinde bulunduğunda ASLA kullanıcının KENDİ adres, telefon veya ödeme bilgisini İSTEME. "ÜRÜN KARTLARI HAZIR" varsa kart üzerindeki [İncele] butonu zaten satın alma sayfasına yönlendirir, ayrıca metin içinde link vermene gerek yok. Kartlar yoksa (örn. daha önce bahsedilen tek bir ürün için devam ediyorsan), bağlamdaki ilgili ürünün "Ürün Satın Alma Linki" değerini kullanarak kullanıcıyı doğrudan o ürünün satın alma sayfasına yönlendir.
     Örnek Yanıt Formatı (kart yokken): "A1 Alüminyum Çerçeve ürününü satın almak için [A1 Alüminyum Çerçeve](https://magaza.ores.com.tr/products/...) sayfasını ziyaret edebilirsiniz. Başka sorularınız olursa yanıtlamaktan memnuniyet duyarım."
@@ -764,14 +1042,15 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
     ÖNEMLİ AYRIM: Bu kural SADECE kullanıcının KENDİ kişisel bilgilerini (adı, adresi, telefonu, kartı) İSTEMENİ yasaklar. ORES'in KENDİ (şirketin) e-posta, telefon, adres gibi iletişim bilgilerini PAYLAŞMAK bu kuralı ihlal etmez; aksine Kural 11'e göre bu bilgiler istenirse paylaşılmalıdır.
 7. LİNK GÜVENLİĞİ VE FORMATI: Kart yokken bir ürün linki paylaşırken SADECE bağlamdaki/arama sonucundaki o ürüne ait "Ürün Satın Alma Linki"/url değerini kullan; hiçbir zaman kendi başına bir URL üretme, tahmin etme veya linki olmayan bir ürüne link verme. İlgili ürünün linki yoksa link vermeden ürünü tanıt. Verdiğin linkleri her zaman markdown formatında [Metin](URL) şeklinde, tıklanabilir olarak yaz.
 8. HİÇBİR ÜRÜNÜ ATLAMA: Kullanıcı bir kategorideki/kritere uyan ürünleri sorduğunda, sonuçta kaç ürün varsa (5, 10, 27 fark etmez) TÜMÜ otomatik olarak kartlarda gösterilir; giriş cümlende "birkaç örnek" gibi ifadelerle sayıyı azaltıyormuş gibi konuşma, TÜM sonuçlardan bahset.
-9. SAYISAL/FİYAT KARŞILAŞTIRMALARINDA TUTARLILIK (ÇOK ÖNEMLİ): Kullanıcı bir fiyatın/sayının belirli bir değerin altında, üstünde veya eşit olup olmadığını sorduğunda ("500 TL'nin altında mı?", "1000 TL'den ucuz mu?" gibi), ÖNCE aritmetik karşılaştırmayı zihninde doğru şekilde yap, SONRA cevabına başla. Cevabının başındaki "Evet"/"Hayır" ifadesi ile devamındaki açıklama ASLA birbiriyle çelişmemeli. Cevap vermeden önce karşılaştırmayı iki kez kontrol et.
+9. SAYISAL/FİYAT/KARGO KARŞILAŞTIRMALARINDA TUTARLILIK (ÇOK ÖNEMLİ): Kullanıcı bir tutarın eşik altında/üstünde olup olmadığını sorduğunda ÖNCE aritmetik yap, SONRA cevapla. "Evet"/"Hayır" ile açıklama ASLA çelişmesin.
+   KARGO ÖRNEĞİ: Ücretsiz kargo eşiği 750 TL. 720 TL → Hayır, ücretsiz değil (720 < 750). 800 TL → Evet, ücretsiz (800 ≥ 750). Bağlamda "KARGO ÜCRETSİZ EŞİĞİ" ipucu varsa ona uy.
 10. SAYISAL YANIT HASSASİYETİ (İSTENEN ADET vs GERÇEK SONUÇ — ÇOK ÖNEMLİ): Kullanıcı belirli bir sayıda ürün istediğinde (örn. "en ucuz 3 ürün", "en pahalı 5 çerçeve") ve search_products / bağlam sonucunda istenenden DAHA AZ ürün döndüğünde, bunu ASLA gizleme veya yumuşatma. Metin yanıtında veritabanında/sonuçta TOPLAM kaç ürün bulunduğunu AÇIKÇA belirt. Belirsiz/yanıltıcı ifadeler YASAK:
    - YANLIŞ: "Evet, en ucuz kaldırım panolarımızdan biri aşağıda..." (sanki daha fazlası varmış gibi)
    - YANLIŞ: "İşte birkaç örnek..." / "en ucuz 3 ürünümüzden biri..."
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO): Eğer kullanıcı kargo süresi, iade koşulları veya garanti gibi bir kurumsal politika soruyorsa, bağlamdaki kurumsal politika dokümanlarına dayanarak kısa ve net cevap ver. Politika bilgisi bağlamda yoksa uydurma yapma, müşteri hizmetleri ekibine yönlendir.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA): Kullanıcı kargo, iade, garanti, ödeme, fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 TL eşiği; genel iade 14 gün; ödeme Visa/Mastercard/iyzico/EFT. İNDİRİMLİ/KAMPANYALI ürün iadesi: KAPSAM DIŞI — "Hayır, indirimdeki ürünler iade edilemez" (14 gün kuralını indirimliye uygulama). Belgede yazmayan fatura/baskı için uydurma; Kural 12 iletişim.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı "sizinle iletişime geçmek istiyorum", "iletişim bilgileriniz nedir", "telefon numaranız/adresiniz/e-postanız nedir" gibi bir talepte bulunduğunda, ASLA sadece "web sitesini ziyaret edin" veya "müşteri hizmetlerine ulaşın" gibi genel bir cevapla geçme. Bağlamda "Şirket ve İletişim Bilgileri" bölümünde gerçek e-posta, telefon numarası ve/veya adres bilgisi varsa, bunları DOĞRUDAN ve eksiksiz şekilde paylaş. Bu bilgiler bağlamda yoksa (ve sadece o zaman) genel bir yönlendirme yap.
 ${
   toolActive
@@ -789,7 +1068,7 @@ ${knownCategoriesText}
 ${hasProductCards ? `\nÜRÜN KARTLARI HAZIR: Bu sorguya uyan ürünler bulundu; arayüzde otomatik olarak yatay kart (carousel) halinde gösterilecek. Kural 0'a KESİNLİKLE uy: metinde ürün detayı / bullet listesi / tablo YAZMA; sadece kısa kibar özet + [[URUN_KARTLARI]] + proaktif satış odaklı kapanış sorusu. "Başka bir konuda yardımcı olmamı ister misiniz?" deme — yerine listedeki modele / boyuta / detaya yönlendiren interaktif bir soru sor. Kullanıcı belirli bir adet istediyse ve sonuç daha azsa Kural 10'a göre gerçek sayıyı açıkça yaz.\n` : ''}
 ${pinnedFollowUpProduct ? `\nTAKİP ÜRÜNÜ KİLİTLENDİ: Kullanıcı az önce gösterilen/konuşulan ürün hakkında bilgi istiyor. Aşağıdaki BAĞLAM BİLGİLERİ bu ürünün TAM kaydıdır. Kural 3'e uyarak özelliklerini, kullanımını, fiyat/stok bilgisini net ve yardımcı bir dille anlat. "Sadece listeye erişebiliyorum" deme. Kart yer tutucusu ([[URUN_KARTLARI]]) kullanma; bu bir detay cevabıdır.\n` : ''}
 BAĞLAM BİLGİLERİ:
-${contextText}`;
+${contextWithHints}`;
 }
 
 export async function POST(req: NextRequest) {
@@ -836,6 +1115,11 @@ export async function POST(req: NextRequest) {
       knownCategories.length > 0
         ? knownCategories.join(', ')
         : 'Kategori bilgisi şu anda alınamadı.';
+    const shippingCartPrefix = await shippingQuantityCartHint(
+      message,
+      supabase,
+      knownCategories
+    );
 
     // 1. Kullanıcının sorduğu soru için baseline (temel) bağlamı vektör
     // aramasıyla oluştur. Bu bağlam iki amaca hizmet eder: (a) politika/
@@ -1048,6 +1332,8 @@ export async function POST(req: NextRequest) {
               isAmbiguousGenericQuery: false,
               toolActive: false,
               pinnedFollowUpProduct: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
             }),
           },
           ...historyMessages,
@@ -1070,7 +1356,203 @@ export async function POST(req: NextRequest) {
     const directCategoryMatches = isLikelyDirectCategoryBrowse(message, knownCategories);
     const messageFilters = extractSearchFiltersFromMessage(message);
 
-    if (directCategoryMatches.length > 0) {
+    // "Stokta olmayan en ucuz çerçeve" gibi sorularda tool_choice kaçabiliyor
+    // ve purchaseIntent eskiden in_stock zorluyordu; buradan deterministik çek.
+    if (messageFilters.out_of_stock_only) {
+      const oosCategories = findMentionedCategories(message, knownCategories);
+      const wantsSingle =
+        looksLikeRankingOrSingleItemQuestion(message) ||
+        /(en ucuz|en pahalı|hangisi|hangisini)/i.test(message);
+      const oosDocs = await executeSearchProducts(supabase, knownCategories, {
+        ...(oosCategories[0] ? { category: oosCategories[0] } : {}),
+        ...messageFilters,
+        out_of_stock_only: true,
+        in_stock_only: false,
+        sort_by: messageFilters.sort_by ?? 'price_asc',
+        limit: wantsSingle ? 1 : 50,
+      });
+      const seenOos = new Set<string>();
+      documents = oosDocs.filter((doc) => {
+        const key = `${doc.metadata?.category ?? ''}|${doc.metadata?.title ?? ''}`;
+        if (seenOos.has(key)) return false;
+        seenOos.add(key);
+        return true;
+      });
+
+      const oosDerived = buildDerivedPromptFields(documents, true);
+      hasProductCards = oosDerived.hasProductCards;
+      const oosGuard =
+        documents.length > 0
+          ? `ÖNEMLİ (STOK=0 ARAMA SONUCU): Veritabanı stok=0 filtresiyle ${documents.length} ürün buldu. ASLA "stokta olmayan ürün yok/bulunmamaktadır" DEME. Ürünü/kartları göster; stok 0 olduğu için anında sipariş onaylama, "şu an stokta yok" de.\n\n`
+          : 'ÖNEMLİ (STOK=0 ARAMA SONUCU): Bu kritere uyan stok=0 ürün bulunamadı.\n\n';
+
+      const oosCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: buildSystemPrompt({
+              knownCategoriesText,
+              contextText: `${oosGuard}${oosDerived.contextText}`,
+              hasProductCards: oosDerived.hasProductCards,
+              isAmbiguousGenericQuery: oosDerived.isAmbiguousGenericQuery,
+              toolActive: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
+            }),
+          },
+          ...historyMessages,
+          { role: 'user', content: message },
+        ],
+        temperature: 0.2,
+      });
+
+      rawReply = oosCompletion.choices[0].message.content ?? '';
+    } else if (messageFilters.on_discount_only && !looksLikePolicyQuestion(message)) {
+      // "İndirimli A1 ... en pahalısı" — tool atlanırsa yanlış/boş cevap üretilmesin
+      const discCategories = findMentionedCategories(message, knownCategories);
+      const wantsSingle =
+        looksLikeRankingOrSingleItemQuestion(message) ||
+        /(en ucuz|en pahalı|en pahali|hangisi)/i.test(message);
+      const discDocs = await executeSearchProducts(supabase, knownCategories, {
+        ...(discCategories[0] ? { category: discCategories[0] } : {}),
+        ...messageFilters,
+        on_discount_only: true,
+        sort_by: messageFilters.sort_by ?? 'price_asc',
+        limit: wantsSingle ? 1 : 50,
+      });
+      const seenDisc = new Set<string>();
+      documents = discDocs.filter((doc) => {
+        const key = `${doc.metadata?.category ?? ''}|${doc.metadata?.title ?? ''}`;
+        if (seenDisc.has(key)) return false;
+        seenDisc.add(key);
+        return true;
+      });
+
+      const discDerived = buildDerivedPromptFields(documents, true);
+      hasProductCards = discDerived.hasProductCards;
+      const discGuard = emptySearchGuard(documents, {
+        ...messageFilters,
+        on_discount_only: true,
+        category: discCategories[0],
+      });
+      const discDoc = documents[0];
+      const listPrice = discDoc?.metadata?.list_price;
+      const salePrice = discDoc?.metadata?.price;
+      const priceAskGuard =
+        documents.length > 0 &&
+        /(liste\s*fiyat|indirimli\s*fiyat|fiyatı\s*nedir|fiyati\s*nedir)/i.test(message)
+          ? `FİYAT DETAYI (KESİN): ${
+              typeof discDoc?.metadata?.title === 'string' ? discDoc.metadata.title : 'Ürün'
+            } — Liste fiyatı: ${
+              typeof listPrice === 'number' ? `${listPrice} TL` : 'yok'
+            }; İndirimli/satış fiyatı: ${
+              typeof salePrice === 'number' ? `${salePrice} TL` : 'yok'
+            }. Metinde her iki fiyatı da AÇIKÇA yaz (sadece karta bırakma).\n\n`
+          : '';
+
+      const discCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: buildSystemPrompt({
+              knownCategoriesText,
+              contextText: `${priceAskGuard}${discGuard}${discDerived.contextText}`,
+              hasProductCards: discDerived.hasProductCards,
+              isAmbiguousGenericQuery: discDerived.isAmbiguousGenericQuery,
+              toolActive: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
+            }),
+          },
+          ...historyMessages,
+          { role: 'user', content: message },
+        ],
+        temperature: 0.2,
+      });
+
+      rawReply = discCompletion.choices[0].message.content ?? '';
+      // Model bazen fiyatları sadece karta bırakıyor; sorulduysa metne ekle.
+      if (
+        priceAskGuard &&
+        typeof listPrice === 'number' &&
+        typeof salePrice === 'number' &&
+        (!rawReply.includes(String(listPrice)) || !rawReply.includes(String(salePrice)))
+      ) {
+        rawReply =
+          `${rawReply}\n\nListe fiyatı: ${listPrice} TL, indirimli fiyat: ${salePrice} TL.`.trim();
+      }
+    } else if (
+      // "en ucuz 3 afiş çerçevesi" — ranking soruları direct-category'yi bypass
+      // ettiği için tool çağrılmazsa kartsız kalabiliyor; burada zorla çek.
+      findMentionedCategories(message, knownCategories).length > 0 &&
+      /(en ucuz|en pahalı|en pahali|en ağır|en agir|en hafif)/i.test(message) &&
+      !messageFilters.out_of_stock_only
+    ) {
+      const rankCategories = findMentionedCategories(message, knownCategories);
+      const countMatch =
+        message.match(/en (?:ucuz|pahalı|pahali|ağır|agir|hafif)\s+(\d+)/i) ||
+        message.match(/(\d+)\s*(?:adet\s+)?(?:en ucuz|en pahalı|en pahali)/i);
+      const requestedCount = countMatch?.[1] ? Number(countMatch[1]) : NaN;
+      const wantsSingle =
+        looksLikeRankingOrSingleItemQuestion(message) &&
+        !(Number.isFinite(requestedCount) && requestedCount > 1);
+      const limit =
+        Number.isFinite(requestedCount) && requestedCount > 0
+          ? Math.min(requestedCount, 50)
+          : wantsSingle
+            ? 1
+            : 50;
+
+      const rankDocs = await executeSearchProducts(supabase, knownCategories, {
+        category: rankCategories[0],
+        ...messageFilters,
+        sort_by: messageFilters.sort_by ?? 'price_asc',
+        limit,
+      });
+      const seenRank = new Set<string>();
+      documents = rankDocs.filter((doc) => {
+        const key = `${doc.metadata?.category ?? ''}|${doc.metadata?.title ?? ''}`;
+        if (seenRank.has(key)) return false;
+        seenRank.add(key);
+        return true;
+      });
+
+      const rankDerived = buildDerivedPromptFields(documents, true);
+      hasProductCards = rankDerived.hasProductCards;
+      const rankGuard = emptySearchGuard(documents, {
+        ...messageFilters,
+        category: rankCategories[0],
+      });
+      const countGuard =
+        Number.isFinite(requestedCount) && requestedCount > 0
+          ? `ÖNEMLİ: Kullanıcı ${requestedCount} ürün istedi; sonuçta ${documents.length} ürün var. Kural 10'a uy.\n\n`
+          : '';
+
+      const rankCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: buildSystemPrompt({
+              knownCategoriesText,
+              contextText: `${countGuard}${rankGuard}${rankDerived.contextText}`,
+              hasProductCards: rankDerived.hasProductCards,
+              isAmbiguousGenericQuery: rankDerived.isAmbiguousGenericQuery,
+              toolActive: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
+            }),
+          },
+          ...historyMessages,
+          { role: 'user', content: message },
+        ],
+        temperature: 0.2,
+      });
+
+      rawReply = rankCompletion.choices[0].message.content ?? '';
+    } else if (directCategoryMatches.length > 0) {
       const categoryResultDocs: MatchedDocument[] = [];
       for (const category of directCategoryMatches) {
         categoryResultDocs.push(
@@ -1090,6 +1572,10 @@ export async function POST(req: NextRequest) {
 
       const categoryDerived = buildDerivedPromptFields(documents, true);
       hasProductCards = categoryDerived.hasProductCards;
+      const categoryGuard = emptySearchGuard(documents, {
+        ...messageFilters,
+        category: directCategoryMatches.join(' | '),
+      });
 
       const categoryCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
@@ -1098,10 +1584,12 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: categoryDerived.contextText,
+              contextText: `${categoryGuard}${categoryDerived.contextText}`,
               hasProductCards: categoryDerived.hasProductCards,
               isAmbiguousGenericQuery: categoryDerived.isAmbiguousGenericQuery,
               toolActive: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
             }),
           },
           ...historyMessages,
@@ -1130,6 +1618,8 @@ export async function POST(req: NextRequest) {
               hasProductCards: false,
               isAmbiguousGenericQuery: baseline.isAmbiguousGenericQuery,
               toolActive: false,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
             }),
           },
           ...historyMessages,
@@ -1166,12 +1656,19 @@ export async function POST(req: NextRequest) {
 
           // Model parametre unutursa bile mesajdan çıkarılan sert filtreler uygulanır
           // (bütçe, stok, indirim, ölçü, renk). Modelin verdiği değer önceliklidir.
+          const outOfStock = Boolean(
+            args.out_of_stock_only || messageFilters.out_of_stock_only
+          );
           const mergedArgs: SearchProductsArgs = {
             ...messageFilters,
             ...args,
             max_price: args.max_price ?? messageFilters.max_price,
             min_price: args.min_price ?? messageFilters.min_price,
-            in_stock_only: Boolean(args.in_stock_only || messageFilters.in_stock_only),
+            out_of_stock_only: outOfStock,
+            // Stokta olmayan aramasında in_stock_only asla true kalmasın
+            in_stock_only: outOfStock
+              ? false
+              : Boolean(args.in_stock_only || messageFilters.in_stock_only),
             on_discount_only: Boolean(args.on_discount_only || messageFilters.on_discount_only),
             dimension: args.dimension || messageFilters.dimension,
             color: args.color || messageFilters.color,
@@ -1218,6 +1715,7 @@ export async function POST(req: NextRequest) {
 
         const toolDerived = buildDerivedPromptFields(documents, true);
         hasProductCards = toolDerived.hasProductCards;
+        const toolGuard = emptySearchGuard(documents, messageFilters);
 
         // 4. İkinci model çağrısı: model artık search_products sonuçlarına
         // (tool mesajları + güncellenmiş sistem prompt'u) sahip; sadece
@@ -1229,10 +1727,12 @@ export async function POST(req: NextRequest) {
               role: 'system',
               content: buildSystemPrompt({
                 knownCategoriesText,
-                contextText: toolDerived.contextText,
+                contextText: `${toolGuard}${toolDerived.contextText}`,
                 hasProductCards: toolDerived.hasProductCards,
                 isAmbiguousGenericQuery: toolDerived.isAmbiguousGenericQuery,
                 toolActive: true,
+                userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
               }),
             },
             ...historyMessages,
