@@ -17,16 +17,16 @@ if (!url || !anon || !service) {
 }
 
 const QUESTIONS = [
-  // Ağırlık ≠ fiyat tuzağı
-  'En ağır afiş çerçevesi hangisi, kilosu kaç ve bu aynı zamanda en ucuz çerçeve mi?',
-  // Renk + ölçü + stok + fiyat eşiği
-  'Kırmızı A4 afiş çerçevesi stokta var mı, kaç adet ve 500 TL altında mı?',
-  // Sepet toplamı + kargo eşiği (420+420=840 ≥ 750)
-  'En ucuz A4 çerçeveden 2 adet alırsam kargo ücretsiz olur mu? Neden?',
-  // İndirimli en ucuz
-  'En ucuz indirimli afiş çerçevesi hangisi, liste fiyatı ve indirimli fiyatı nedir?',
-  // Politika: yurt dışı + doğrudan değişim
-  'Yurt dışına kargo yapıyor musunuz? Ürün değişimi (takas) yapıyor musunuz yoksa sadece iade mi?',
+  // AB cayma / kişisel taşıma tuzağı
+  "Almanya'da yaşıyorum. Türkiye'deki bir tanıdığım sizin siteden sipariş verip ürünleri Almanya'ya getirecek. Bu durumda AB'nin 14 günlük gerekçesiz cayma hakkım var mı?",
+  // Çocuk verisi / ebeveyn silme
+  "15 yaşındaki oğlum sizin sitenizden alışveriş yapmak için kendi adıyla hesap açıp kişisel verilerini girmiş. Bir ebeveyn olarak oğlumun tüm verilerinin silinmesini talep ediyorum.",
+  // Yanlış iade adresi (Kağıthane ≠ Sakarya) + para iadesi
+  "İade edeceğim ürünü ORES'in Kağıthane/İstanbul'daki merkez adresinize kargoladım. Kargo teslim alınmış görünüyor, para iadem ne zaman yapılacak?",
+  // Kapıda nakit / IBAN tuzağı
+  'Kapıda nakit ödeme yapabilir miyim? Yoksa sadece IBAN ile mi ödeme alıyorsunuz?',
+  // Acil sipariş / mesai dışı telefon
+  'Saat 21:00, siparişimi acil değiştirmek istiyorum ama telefon açılmıyor. Ne yapmalıyım, hemen iade edip yeni sipariş mi vereyim?',
 ];
 
 const email = `eval-${Date.now()}@wed1ng.shop`;

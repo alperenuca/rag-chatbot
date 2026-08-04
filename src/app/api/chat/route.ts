@@ -777,13 +777,49 @@ function undocumentedCheckoutHint(message: string): string {
  * (Politika: indirimdeki ürünler iade kapsamı dışındadır.)
  * Not: "sipariş değişikliği" ≠ ürün takası; onu urgentSupportHint karşılar.
  */
+/** Acil sipariş değişikliği/iptal — iade+takas ipuçlarını bastırmak için. */
+function looksLikeUrgentOrderChange(text: string): boolean {
+  const change =
+    /(sipariş.*(değiş|degis|iptal)|değiştir|degistir|değişiklik|degisiklik|iptal et)/i.test(
+      text
+    );
+  const urgentChannel =
+    /(acil|hemen|telefon|açan yok|acan yok|mesai|akşam|gece|\d{1,2}\s*[:.]\s*\d{2})/i.test(
+      text
+    );
+  return change && urgentChannel;
+}
+
 function returnPolicyHint(message: string): string {
   const text = message.toLocaleLowerCase('tr-TR');
-  // Sipariş değişikliği/iptali buraya düşmesin
-  if (/(sipariş\s*değiş|siparişi\s*değiş|sipariş\s*iptal|değişiklik)/i.test(text) && !/\biade\b|\btakas\b/i.test(text)) {
+  // Acil sipariş değişikliği sorusunda "iade+yeni sipariş" ipucu modele sızmasın
+  if (looksLikeUrgentOrderChange(text)) return '';
+  // Sipariş değişikliği/iptali (üründen bağımsız) buraya düşmesin
+  if (
+    /(sipariş\s*değiş|siparişi\s*değiş|sipariş\s*iptal|değişiklik)/i.test(text) &&
+    !/\biade\b|\btakas\b/i.test(text)
+  ) {
     return '';
   }
   if (!/(iade|cayma|\bdeğişim\b|\bdegisim\b|\btakas\b)/i.test(text)) return '';
+
+  const misdirected =
+    /(kağıthane|kagithane|merkez adres|doğrudan gönder|direkt gönder|kargoladım|kargoladim|teslim alınmış|teslim alinmis)/i.test(
+      text
+    );
+
+  if (misdirected) {
+    return [
+      '=== ZORUNLU CEVAP (YANLIŞ İADE ADRESİ / TALEPSİZ GÖNDERİM) — ÖNCE BUNU UYGULA ===',
+      'YANLIŞ: Cevaba "ürün incelenecek, 10 iş günü içinde para iadesi" ile başlamak (sanki usulüne uygun iade varmış gibi).',
+      'DOĞRU SIRALAMA (bu sırayla yaz):',
+      '1) Resmi iade adresi Sakarya 1. OSB 2. Cadde No:12, Arifiye / Sakarya. Kağıthane/İstanbul merkez adresi İADE ADRESİ DEĞİLDİR.',
+      '2) İade talebi oluşturmadan / etiket almadan gönderilen ürünler kabul edilmeyebilir.',
+      '3) Hemen sipariş + kargo takip no ile iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00) yazmasını söyle; operasyon paketi arasın.',
+      '4) Usulüne uygun iade onaylanırsa para iadesi 10 iş günü (banka ek süre); onaydan 15 iş günü sonra hâlâ yoksa tekrar yazın — bunu ikincil bilgi olarak ver, ana cevap yapma.',
+      'Kesin "paranız şu gün yatar / kargo teslim alındıysa iade kesin işler" DEME.',
+    ].join('\n');
+  }
 
   const lines = [
     'İADE ÖZETİ (KESİN): Genel iade süresi teslimattan sonra 14 gündür; ürün kullanılmamış, etiketli ve orijinal ambalajında olmalı. İade talebi iletisim@ores.com.tr üzerinden oluşturulur; kabul edilirse iade kargo etiketi + gönderim talimatı gelir.',
@@ -797,18 +833,6 @@ function returnPolicyHint(message: string): string {
   if (/(indirim|kampanya)/i.test(text)) {
     lines.push(
       'BU SORU İNDİRİMLİ ÜRÜN İADESİ: Cevaba "Hayır" ile başla. İndirimdeki ürün iade edilemez. "14 gün içinde iade edebilirsiniz" DEME — bu genel kural indirimli ürüne uygulanmaz.'
-    );
-  }
-
-  if (
-    /(kağıthane|kagithane|merkez adres|doğrudan gönder|direkt gönder|kargoladım|kargoladim|teslim alınmış|teslim alinmis|para iade|ne zaman.*iade|iadem ne zaman)/i.test(
-      text
-    )
-  ) {
-    lines.push(
-      'BU SORU YANLIŞ ADRES / ZATEN GÖNDERİLMİŞ İADE: Sadece genel "10 iş günü" zaman çizelgesini sanki her şey yolundaymış gibi anlatma.',
-      'Kağıthane\'ye gönderildiyse: resmi iade adresi Sakarya/Arifiye olduğunu söyle; talep+etiket olmadan gönderimin kabul edilmeyebileceğini uyar.',
-      'Hemen sipariş/takip no ile iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00) yönlendir; operasyon durumunu kontrol etsin. Kesin "paranız şu gün yatar" vaat etme.'
     );
   }
 
@@ -843,7 +867,7 @@ function internationalReturnHint(message: string): string {
 function childDataHint(message: string): string {
   const text = message.toLocaleLowerCase('tr-TR');
   const childOrParent =
-    /(çocuk|cocuk|oğul|oglu|kızım|kizim|ebeveyn|veli|vasi|yaşındaki|yasindaki|15\s*yaş|16\s*yaş|reşit değil|resit degil)/i.test(
+    /(çocuk|cocuk|oğl|oglum|oğul|oglu|kızım|kizim|kızın|kizin|ebeveyn|veli|vasi|yaşındaki|yasindaki|\d{1,2}\s*yaş|reşit değil|resit degil)/i.test(
       text
     );
   const dataOrDelete =
@@ -853,12 +877,14 @@ function childDataHint(message: string): string {
   if (!childOrParent || !dataOrDelete) return '';
 
   return [
-    'ÇOCUK VERİLERİ / EBEVEYN SİLME (KESİN — §6.8): Sadece "mail atın" deme. Politikayı özetle:',
+    '=== ZORUNLU CEVAP (ÇOCUK VERİSİ §6.8) — ÖNCE BUNU UYGULA ===',
+    'YANLIŞ: Sadece "iletisim@ores.com.tr yazın, silme yapılır" deyip politika maddelerini atlamak.',
+    'DOĞRU SIRALAMA (bu noktaların hepsini kısaca yaz):',
     '1) Hizmetler çocuklar tarafından kullanılması için amaçlanmamıştır; çocuklar hakkında bilerek kişisel bilgi toplanmaz.',
-    '2) Bilgilerini paylaşmış bir çocuğun ebeveyni veya vasisi, bu bilgilerin silinmesini talep etmek için ORES ile iletişime geçebilir — talebi geçerli kabul et, reddetme.',
-    '3) Politika notu: yürürlük tarihi itibarıyla 16 yaşın altındaki bireylerin kişisel bilgilerinin paylaşıldığına veya satıldığına dair bir bilgi bulunmamaktadır (kısaca belirt).',
-    '4) Silme/hak kullanımı için: iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00). Talebe yanıt öncesi kimlik/hesap doğrulaması istenebilir — uydurma ek prosedür ekleme.',
-    'Anında silindi / chat üzerinden sildik diye vaat etme; kanalı ve politika özetini ver.',
+    '2) Bilgisini paylaşmış bir çocuğun ebeveyni/vasisi silme talep edebilir — talebiniz bu kapsamdadır, geçerlidir.',
+    '3) Politika notu: yürürlük tarihi itibarıyla 16 yaşın altındaki bireylerin kişisel bilgilerinin paylaşıldığına veya satıldığına dair bilgi bulunmamaktadır.',
+    '4) Talebi iletmek için: iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00). Yanıt öncesi kimlik/hesap doğrulaması istenebilir.',
+    'Anında silindi / chat üzerinden sildik diye vaat etme.',
   ].join('\n');
 }
 
@@ -890,6 +916,8 @@ function disputeLegalHint(message: string): string {
  */
 function wrongAddressHint(message: string): string {
   const text = message.toLocaleLowerCase('tr-TR');
+  // İade gönderimi / Kağıthane senaryosu → returnPolicyHint; teslimat adresi kuralını karıştırma
+  if (/\biade\b|(kağıthane|kagithane)/i.test(text)) return '';
   if (
     !/(adres|yanlış gir|yanlis gir|başka şehir|baska sehir|geri dön|geri don|ikinci kargo|tekrar kargo|fatura adres|teslimat adres)/i.test(
       text
@@ -932,19 +960,31 @@ function damagedProductHint(message: string): string {
 function urgentSupportHint(message: string): string {
   const text = message.toLocaleLowerCase('tr-TR');
   const urgent =
-    /(acil|hemen|açan yok|yanıt vermez|cevap vermez|iptal edeceğ|sinir|beklet|ulaşamıyorum)/i.test(
+    /(acil|hemen|açan yok|acan yok|yanıt vermez|cevap vermez|iptal edeceğ|sinir|beklet|ulaşamıyorum)/i.test(
       text
     );
   const orderChange =
-    /(sipariş\s*değiş|siparişi\s*değiş|sipariş\s*iptal|siparişi\s*iptal|değişiklik|iptal et)/i.test(
+    /(sipariş.*(değiş|degis|iptal)|değiştir|degistir|değişiklik|degisiklik|iptal et)/i.test(
       text
     );
   const phoneOrHours =
-    /(telefon|arıyorum|aradım|açan yok|mesai|çalışma saat|akşam|gece|arayabilir|\d{1,2}\s*[:.]\s*\d{2})/i.test(
+    /(telefon|arıyorum|aradım|açan yok|acan yok|mesai|çalışma saat|akşam|gece|arayabilir|\d{1,2}\s*[:.]\s*\d{2})/i.test(
       text
     );
 
   if (!urgent && !orderChange && !phoneOrHours) return '';
+
+  if (looksLikeUrgentOrderChange(text) || (orderChange && (urgent || phoneOrHours))) {
+    return [
+      '=== ZORUNLU CEVAP (ACİL SİPARİŞ / MESAİ DIŞI) — ÖNCE BUNU UYGULA ===',
+      'YANLIŞ (ASLA YAZMA): "Önce ürünü iade edin / iade edip yeni sipariş verin" — ürün teslim alındığı söylenmeden bunu önerme.',
+      'DOĞRU SIRALAMA:',
+      '1) Empati + telefon +90 264 531 00 10–11 yalnızca 08:00–18:00; akşam/gece açılmaması normal olabilir.',
+      '2) Acil kayıt: HEMEN iletisim@ores.com.tr — sipariş numarası + ne değişsin/iptal.',
+      '3) Yarın mesai içinde telefonu da dene.',
+      '4) Chat üzerinden anlık iptal/değişiklik belgede yok; iade+yeni sipariş şablonunu KULLANMA.',
+    ].join('\n');
+  }
 
   const lines = [
     'İLETİŞİM / MESAİ (KESİN): Telefon +90 264 531 00 10–11, yalnızca 08:00–18:00. E-posta: iletisim@ores.com.tr (yanıt genelde 1–3 iş günü). İkisini de paylaş.',
@@ -970,17 +1010,18 @@ function urgentSupportHint(message: string): string {
 }
 
 function withPolicyHints(message: string, contextText: string): string {
+  // En kritik / çakışmaya açık ipuçları önce (model FAQ parçasına kaymasın)
   const hints = [
+    childDataHint(message),
+    urgentSupportHint(message),
+    returnPolicyHint(message),
+    internationalReturnHint(message),
     shippingThresholdHint(message),
     paymentMethodsHint(message),
     undocumentedCheckoutHint(message),
     damagedProductHint(message),
     wrongAddressHint(message),
-    internationalReturnHint(message),
-    childDataHint(message),
     disputeLegalHint(message),
-    returnPolicyHint(message),
-    urgentSupportHint(message),
   ].filter(Boolean);
   if (hints.length === 0) return contextText;
   return `${hints.join('\n\n')}\n\n${contextText}`;
@@ -1222,7 +1263,9 @@ SIRALAMA ÖNCELİĞİ: "En ağır hangisi ve en ucuz mu?" → önce en ağırı 
 Örnek KARMA: "Galatasaray afişi için hangi ölçü uygun ve Icardi hangi takımda?" → çerçeve ölçülerini/kategoriyi öner; Icardi sorusuna cevap VERME ("sporcu bilgisi veremem").
 Örnek KAPSAM İÇİ (ödeme): "şahıs kartı + kurumsal fatura / e-fatura" → reddetme; belgede varsa söyle, yoksa uydurma, Kural 12 iletişim ver.
 Örnek KAPSAM İÇİ (kapıda nakit / IBAN): "Kapıda nakit ödeyebilir miyim? Havale IBAN nerede?" → Kapıda nakit YOK (Hayır); kabul edilenler Visa/Mastercard/iyzico/havale-EFT; IBAN uydurma, iletişime yönlendir.
-Örnek KAPSAM İÇİ (acil / mesai dışı): "Saat 21:00 acil sipariş değişikliği, telefon açılmıyor" → Empati; telefon 08:00–18:00 diye belirt; iletisim@ores.com.tr + yarın telefon; "hemen iade+yeni sipariş" varsayma.
+Örnek KAPSAM İÇİ (acil / mesai dışı): "Saat 21:00 acil sipariş değişikliği, telefon açılmıyor / iade edip yeniden mi alayım?" → Empati; telefon 08:00–18:00; iletisim@ores.com.tr + yarın telefon; ASLA "önce iade edip yeni sipariş verin" deme.
+Örnek KAPSAM İÇİ (Kağıthane'ye iade kargosu): "Merkeze kargoladım, para ne zaman?" → Önce: iade adresi Sakarya/Arifiye (Kağıthane değil); talep+etiketsiz kabul edilmeyebilir; hemen iletişim. "10 iş günü"yi usulüne uygun onay sonrası ikincil bilgi yap.
+Örnek KAPSAM İÇİ (çocuk verisi): "15 yaş oğlum hesap açtı, verilerini silin" → §6.8: çocuklara yönelik değil; ebeveyn silebilir; 16 yaş altı notu; e-posta+telefon. Sadece "mail atın" yetmez.
 Örnek KAPSAM İÇİ (özel ölçü): "120x240 ışıklı stand" → reddetme; katalogda yoksa söyle; "üretiriz/üretmeyiz" uydurma; iletişim ver.
 Örnek KAPSAM İÇİ (baskı): "afiş baskısı yapıyor musunuz?" → reddetme. Belgede hizmet yoksa: "Kataloğumuzda/politika metninde afiş baskı hizmeti geçmiyor" de. "Yapıyoruz / yapmıyoruz / mümkün" diye KESİN iddia UYDURMA; teyit için Kural 12 iletişim ver.
 ÇİFT İSTEK: "Sizde X var mı? Yoksa en ucuz 3 çerçeveyi göster" → Önce X katalog kategorilerinde yoksa bunu söyle (iPhone kılıfı/mouse pad vb. YOK); sonra ikinci istek için search_products ile çerçeveleri getir. İlk soruyu yok sayma.
