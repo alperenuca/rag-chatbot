@@ -94,6 +94,22 @@ function looksLikeGreetingOrChitchat(message: string): boolean {
  * Ürün kartlı cevaplarda ürünler; aksi halde bağlamdaki policy (+ varsa ürün) chunk'ları.
  * Selamlaşma/kimlik sorularında boş döner (kaynak yanıltıcı olmasın).
  */
+function dedupeDocuments(docs: MatchedDocument[]): MatchedDocument[] {
+  const seen = new Set<string>();
+  return docs.filter((doc) => {
+    const key = `${doc.metadata?.type ?? ''}|${doc.metadata?.source ?? ''}|${
+      doc.metadata?.title ?? doc.metadata?.sku ?? doc.content.slice(0, 80)
+    }`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * UI "Kaynaklar" paneli için en fazla MAX_CITATION_SOURCES kayıt.
+ * Ürün kartları buna BAĞLI DEĞİLDİR — kartlar buildProductCardSources ile gelir.
+ */
 function buildCitationSources(
   documents: MatchedDocument[],
   hasProductCards: boolean,
@@ -102,26 +118,15 @@ function buildCitationSources(
   if (looksLikeGreetingOrChitchat(message)) return [];
   if (!documents.length) return [];
 
-  const seen = new Set<string>();
-  const dedupe = (docs: MatchedDocument[]) =>
-    docs.filter((doc) => {
-      const key = `${doc.metadata?.type ?? ''}|${doc.metadata?.source ?? ''}|${
-        doc.metadata?.title ?? doc.metadata?.sku ?? doc.content.slice(0, 80)
-      }`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-
   const bySimilarity = (docs: MatchedDocument[]) =>
     [...docs].sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0));
 
+  // Kartlı cevapta kaynak panelinde tüm ürünleri tekrar dökme; birkaç örnek yeter
   if (hasProductCards) {
     const products = documents.filter((doc) => doc.metadata?.type === 'product');
-    return bySimilarity(dedupe(products)).slice(0, MAX_CITATION_SOURCES);
+    return bySimilarity(dedupeDocuments(products)).slice(0, MAX_CITATION_SOURCES);
   }
 
-  // Politika / karışık: önce policy, boşsa ürünler, yoksa tüm bağlam
   const policies = documents.filter(
     (doc) => doc.metadata?.type === 'policy' && !isLowValuePolicyChunk(doc)
   );
@@ -133,7 +138,21 @@ function buildCitationSources(
         ? bySimilarity(products)
         : bySimilarity(documents.filter((doc) => !isLowValuePolicyChunk(doc)));
 
-  return dedupe(pool).slice(0, MAX_CITATION_SOURCES);
+  return dedupeDocuments(pool).slice(0, MAX_CITATION_SOURCES);
+}
+
+/**
+ * Carousel için TÜM eşleşen ürünler. Eskiden citation cap (3) aynı diziye
+ * uygulanıyordu → "afiş çerçevesi"nde 27 yerine 3 kart görünüyordu.
+ */
+function buildProductCardSources(
+  documents: MatchedDocument[],
+  hasProductCards: boolean
+): MatchedDocument[] {
+  if (!hasProductCards) return [];
+  return dedupeDocuments(
+    documents.filter((doc) => doc.metadata?.type === 'product')
+  );
 }
 
 // OpenAI'a gönderilecek geçmiş uzunluğunu makul bir sınırda tut.
@@ -387,12 +406,13 @@ function looksLikeRankingOrSingleItemQuestion(text: string): boolean {
  */
 function isLikelyDirectCategoryBrowse(message: string, knownCategories: string[]): string[] {
   if (looksLikeRankingOrSingleItemQuestion(message)) return [];
+  if (wantsAllCatalogProducts(message)) return [];
 
   const wordCount = message.trim().split(/\s+/).filter(Boolean).length;
   if (wordCount === 0) return [];
 
   const browseIntent =
-    /(hakkında|bilgi|göster|listele|neler var|hangileri|ürünler|almak istiyorum|incelemek|indirimli|kampanya|stokta|bütçe|\btl\b|lira|satın al)/i.test(
+    /(hakkında|bilgi|göster|listele|neler var|hangileri|ürünler|almak istiyorum|incelemek|indirimli|kampanya|stokta|bütçe|\btl\b|lira|satın al|görmek)/i.test(
       message
     );
 
@@ -402,6 +422,34 @@ function isLikelyDirectCategoryBrowse(message: string, knownCategories: string[]
   if (wordCount > 22) return [];
 
   return findMentionedCategories(message, knownCategories);
+}
+
+/** "Tüm ürünleri göster / katalogdaki her şey" */
+function wantsAllCatalogProducts(message: string): boolean {
+  return /(tüm\s*ürün|tum\s*urun|bütün\s*ürün|butun\s*urun|tüm\s*katalog|katalogdaki\s*her|hepsini\s*(göster|gör|listele|incele)|bütün\s*katalog|mağazadaki\s*tüm)/i.test(
+    message
+  );
+}
+
+/** "27 adet yok mu? / kaç ürün var?" — sayıyı DB'den doğrula */
+function looksLikeCatalogCountQuestion(message: string): boolean {
+  return /(kaç\s*(adet|ürün)|(?:\d+)\s*adet.{0,40}(?:yok\s*mu|değil\s*mi|var\s*mı|değil)|daha\s*fazla\s*ürün|hepsi\s*bu|yalnızca\s*\d+|sadece\s*\d+\s*ürün|bu kadar\s*mı)/i.test(
+    message
+  );
+}
+
+function inferCategoryFromHistory(
+  history: HistoryTurn[],
+  message: string,
+  knownCategories: string[]
+): string | null {
+  const fromMessage = findMentionedCategories(message, knownCategories);
+  if (fromMessage[0]) return fromMessage[0];
+  const blob = [...history]
+    .slice(-6)
+    .map((turn) => turn.content)
+    .join(' ');
+  return findMentionedCategories(blob, knownCategories)[0] ?? null;
 }
 
 /**
@@ -2112,9 +2160,90 @@ export async function POST(req: NextRequest) {
     const directCategoryMatches = isLikelyDirectCategoryBrowse(message, knownCategories);
     const messageFilters = extractSearchFiltersFromMessage(message);
 
-    // "Stokta olmayan en ucuz çerçeve" gibi sorularda tool_choice kaçabiliyor
-    // ve purchaseIntent eskiden in_stock zorluyordu; buradan deterministik çek.
-    if (messageFilters.out_of_stock_only) {
+    // "Tüm ürünleri göster" — kategori yok; tüm katalog kartlarla
+    if (wantsAllCatalogProducts(message)) {
+      documents = await executeSearchProducts(supabase, knownCategories, {
+        sort_by: 'price_asc',
+        limit: 200,
+      });
+      const allDerived = buildDerivedPromptFields(documents, true);
+      hasProductCards = allDerived.hasProductCards;
+      const allGuard = `KATALOG LİSTESİ (KESİN): Mağazada toplam ${documents.length} ürün var. Hepsini kartlarda göster; "aşağıda" deyip kart/yer tutucu unutma. Yanlış sayı UYDURMA.\n\n`;
+
+      const allCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: buildSystemPrompt({
+              knownCategoriesText,
+              contextText: `${allGuard}${allDerived.contextText}`,
+              hasProductCards: allDerived.hasProductCards,
+              isAmbiguousGenericQuery: false,
+              toolActive: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
+            }),
+          },
+          ...historyMessages,
+          { role: 'user', content: message },
+        ],
+        temperature: 0.2,
+      });
+      rawReply = allCompletion.choices[0].message.content ?? '';
+      if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
+        rawReply = `Mağazamızdaki ${documents.length} ürünü aşağıda inceleyebilirsiniz:\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nListedeki ürünlerden ilgilendiğiniz bir model var mı?`;
+      }
+    } else if (looksLikeCatalogCountQuestion(message)) {
+      // "27 adet yok mu?" — önceki kategori / mesajdan sayıyı DB'den doğrula
+      const countCategory = inferCategoryFromHistory(
+        cleanHistory,
+        message,
+        knownCategories
+      );
+      documents = await executeSearchProducts(supabase, knownCategories, {
+        ...(countCategory ? { category: countCategory } : {}),
+        limit: 200,
+      });
+      const countDerived = buildDerivedPromptFields(documents, true);
+      hasProductCards = countDerived.hasProductCards;
+      const scopeLabel = countCategory
+        ? `"${countCategory}" kategorisinde`
+        : 'katalogda';
+      const countGuard = `ÜRÜN SAYISI (KESİN): ${scopeLabel} TAM ${documents.length} ürün var. Kullanıcı farklı bir sayı söylediyse kibarca düzelt; "yalnızca 10" gibi yanlış sayı UYDURMA. Kartları göster.\n\n`;
+
+      const countCompletion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: buildSystemPrompt({
+              knownCategoriesText,
+              contextText: `${countGuard}${countDerived.contextText}`,
+              hasProductCards: countDerived.hasProductCards,
+              isAmbiguousGenericQuery: false,
+              toolActive: true,
+              userMessage: message,
+              extraContextPrefix: shippingCartPrefix,
+            }),
+          },
+          ...historyMessages,
+          { role: 'user', content: message },
+        ],
+        temperature: 0.2,
+      });
+      rawReply = countCompletion.choices[0].message.content ?? '';
+      if (
+        !/\b\d+\b/.test(rawReply) ||
+        !rawReply.includes(String(documents.length))
+      ) {
+        rawReply =
+          `${scopeLabel} toplam ${documents.length} ürün bulunmaktadır. İlgili ürünleri aşağıda görebilirsiniz:\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nListedeki ürünlerden ilgilendiğiniz bir model var mı?`.trim();
+        hasProductCards = documents.length > 0;
+      } else if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
+        rawReply = `${rawReply}\n\n${PRODUCT_CARDS_PLACEHOLDER}`;
+      }
+    } else if (messageFilters.out_of_stock_only) {
       const oosCategories = findMentionedCategories(message, knownCategories);
       const wantsSingle =
         looksLikeRankingOrSingleItemQuestion(message) ||
@@ -2574,6 +2703,7 @@ export async function POST(req: NextRequest) {
           ...(await executeSearchProducts(supabase, knownCategories, {
             category,
             ...messageFilters,
+            limit: 200,
           }))
         );
       }
@@ -2591,6 +2721,10 @@ export async function POST(req: NextRequest) {
         ...messageFilters,
         category: directCategoryMatches.join(' | '),
       });
+      const countGuard =
+        documents.length > 0
+          ? `KATEGORİ LİSTESİ (KESİN): "${directCategoryMatches.join(' / ')}" için TAM ${documents.length} ürün var; hepsi kartlarda. Cevapta bu sayıyı kullan. "10 ürün / birkaç ürün" diye eksik sayı UYDURMA.\n\n`
+          : '';
 
       const categoryCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
@@ -2599,7 +2733,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: `${categoryGuard}${categoryDerived.contextText}`,
+              contextText: `${countGuard}${categoryGuard}${categoryDerived.contextText}`,
               hasProductCards: categoryDerived.hasProductCards,
               isAmbiguousGenericQuery: categoryDerived.isAmbiguousGenericQuery,
               toolActive: true,
@@ -2614,6 +2748,9 @@ export async function POST(req: NextRequest) {
       });
 
       rawReply = categoryCompletion.choices[0].message.content ?? '';
+      if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
+        rawReply = `${rawReply}\n\n${PRODUCT_CARDS_PLACEHOLDER}`;
+      }
     } else {
       // 2. İlk model çağrısı: model, elindeki baseline bağlamla doğrudan
       // cevap verebilir YA DA kesin filtreleme/sıralama gerektiren bir istek
@@ -2848,8 +2985,12 @@ export async function POST(req: NextRequest) {
     );
     const activeConversationId = conversationResult?.id ?? null;
 
-    // Cevapta kullanılan urunler.csv / politikalar.md kayıtlarını kaynak olarak dön.
+    // Kartlar için TÜM ürünler; Kaynaklar paneli için kısa citation listesi.
+    // Persist: kartların sohbet yenilenince de gelmesi için productSources saklanır.
     const citationSources = buildCitationSources(documents, hasProductCards, message);
+    const productCardSources = buildProductCardSources(documents, hasProductCards);
+    const persistedSources =
+      productCardSources.length > 0 ? productCardSources : citationSources;
 
     if (activeConversationId) {
       const { error: insertError } = await supabase.from('messages').insert([
@@ -2864,7 +3005,7 @@ export async function POST(req: NextRequest) {
           user_id: user.id,
           role: 'assistant',
           content: reply,
-          sources: citationSources.length > 0 ? citationSources : null,
+          sources: persistedSources.length > 0 ? persistedSources : null,
         },
       ]);
 
@@ -2880,7 +3021,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       reply,
-      sources: citationSources,
+      // Geriye uyumluluk: carousel `sources` içindeki product metadata'yı okur
+      sources: persistedSources.length > 0 ? persistedSources : citationSources,
+      citations: citationSources,
       conversationId: activeConversationId,
       conversationTitle: conversationResult?.title ?? null,
     });

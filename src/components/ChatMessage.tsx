@@ -9,7 +9,10 @@ import SourcesAccordion, { type DocumentSource } from './SourcesAccordion';
 export interface ChatMessageData {
   role: 'user' | 'assistant';
   content: string;
+  /** Carousel + (gerekirse) kalıcı ürün kayıtları — tüm eşleşen ürünler */
   sources?: DocumentSource[];
+  /** Kaynaklar paneli için kısa liste (opsiyonel; yoksa sources’tan kısaltılır) */
+  citations?: DocumentSource[];
   timestamp?: number;
 }
 
@@ -52,6 +55,14 @@ export default function ChatMessage({
 
   const productCards = isUser ? [] : extractProductCards(message.sources);
   const showCarousel = productCards.length > 0 && message.content.includes(PRODUCT_CARDS_PLACEHOLDER);
+  // Kartlar tüm ürünleri `sources`ta tutar; panelde 27 satır tekrarlama.
+  const accordionSources = isUser
+    ? undefined
+    : message.citations && message.citations.length > 0
+      ? message.citations
+      : showCarousel
+        ? message.sources?.slice(0, 3)
+        : message.sources;
   const [beforeText, afterText] = showCarousel
     ? (() => {
         const [first, ...rest] = message.content.split(PRODUCT_CARDS_PLACEHOLDER);
@@ -108,7 +119,7 @@ export default function ChatMessage({
               </div>
             )}
 
-            {!isUser && <SourcesAccordion sources={message.sources} />}
+            {!isUser && <SourcesAccordion sources={accordionSources} />}
           </div>
         )}
 

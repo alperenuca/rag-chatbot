@@ -226,7 +226,13 @@ export default function Home() {
 
         setMessages((prev) => [
           ...prev,
-          { role: 'assistant', content: data.reply, sources: data.sources, timestamp: Date.now() },
+          {
+            role: 'assistant',
+            content: data.reply,
+            sources: data.sources,
+            citations: data.citations,
+            timestamp: Date.now(),
+          },
         ]);
       } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : 'Yanıt alınamadı.';
