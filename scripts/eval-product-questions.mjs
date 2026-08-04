@@ -228,6 +228,23 @@ const CASES = [
     ],
     minProductSources: 3,
   },
+  {
+    name: '5311 >= 5310 yeterlilik: Evet (sabit fiyat bahanesi yok)',
+    history: [
+      {
+        role: 'user',
+        content: 'Ores Poster Swing - Su Depolu Kaldırım Reklam Panosu fiyatı nedir',
+      },
+      {
+        role: 'assistant',
+        content:
+          'Ores Poster Swing - Su Depolu Kaldırım Reklam Panosu indirimli fiyatı 5310 TL.',
+      },
+    ],
+    q: '5311 tl elimde var ben bu ürünü alabilir miyim',
+    mustInclude: [/evet/i, /5310/],
+    mustNotInclude: [/hayır/i, /kabul edilmez|alamazsınız|imkânı yoktur/i],
+  },
 ];
 
 const email = `eval-prod-${Date.now()}@wed1ng.shop`;

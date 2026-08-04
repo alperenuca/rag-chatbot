@@ -559,6 +559,74 @@ function inferSuggestedAlternateCategory(
   return knownCategories.find((c) => c !== stuck) ?? knownCategories[0] ?? null;
 }
 
+/** "5311 TL elimde var, bu ürünü alabilir miyim?" — katalog bütçe filtresi değil */
+function looksLikeAffordabilityQuestion(message: string): boolean {
+  const t = message.toLocaleLowerCase('tr-TR');
+  if (/(neden\s*alamam|neden\s*alamıyorum|neden\s*olmaz|neden\s*alamaz)/i.test(t)) {
+    return true;
+  }
+  if (
+    /((?:elimde|bende|cüzdanımda).{0,40}\d+|\d+.{0,40}(?:elimde|bende)\s*var)/i.test(t) &&
+    /(alabilir|almak|yeter|ürün|satın)/i.test(t)
+  ) {
+    return true;
+  }
+  if (
+    /\d+(?:[.,]\d+)?\s*(?:tl|₺|lira)?/.test(t) &&
+    /(bu\s+ürünü?\s*)?(alabilir\s*miyim|almak\s*ister|ile\s*al)/i.test(t)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function extractAffordabilityAmount(message: string): number | null {
+  const t = message.toLocaleLowerCase('tr-TR');
+  const patterns = [
+    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:elimde|bende)/i,
+    /(?:elimde|bende|cüzdanımda)\s*(\d+(?:[.,]\d+)?)/i,
+    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira)?\s*[ey]'?(?:ye|e)?\s*neden\s*alam/i,
+    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)\b/i,
+    /\b(\d+(?:[.,]\d+)?)\b/,
+  ];
+  for (const pattern of patterns) {
+    const match = t.match(pattern);
+    if (match?.[1]) {
+      const value = Number(match[1].replace(',', '.'));
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+  }
+  return null;
+}
+
+function buildAffordabilityReply(
+  amount: number,
+  product: MatchedDocument
+): string | null {
+  const price = product.metadata?.price;
+  if (typeof price !== 'number' || !Number.isFinite(price)) return null;
+  const title =
+    typeof product.metadata?.title === 'string' && product.metadata.title.trim()
+      ? product.metadata.title.trim()
+      : 'Bu ürün';
+  const stock = product.metadata?.stock;
+  const url =
+    typeof product.metadata?.url === 'string' ? product.metadata.url.trim() : '';
+  const linkBit = url ? ` Satın alma: [${title}](${url}).` : '';
+
+  if (amount >= price) {
+    const stockBit =
+      typeof stock === 'number' && stock <= 0
+        ? ` Bütçeniz yeterli; ancak ürün şu an stokta yok — stok veya alternatif için yardımcı olabilirim.`
+        : linkBit ||
+          ' Mağaza sayfasından sipariş verebilirsiniz.';
+    return `Evet — elinizdeki ${amount} TL yeterli (satış fiyatı ${price} TL). Ödeme ${price} TL üzerinden alınır; elinizde fazlası olması sorunu değil.${stockBit}`;
+  }
+
+  const gap = Math.round((price - amount) * 100) / 100;
+  return `Hayır — "${title}" satış fiyatı ${price} TL. Elinizdeki ${amount} TL yetersiz (fark ${gap} TL).`;
+}
+
 /**
  * Kullanıcı mesajından deterministik arama filtrelerini çıkarır.
  * Direct category browse yolunda tool çağrısı atlandığı için burada
@@ -567,6 +635,12 @@ function inferSuggestedAlternateCategory(
 function extractSearchFiltersFromMessage(message: string): Partial<SearchProductsArgs> {
   const text = message.toLocaleLowerCase('tr-TR');
   const filters: Partial<SearchProductsArgs> = {};
+
+  // "5311 elimde var alabilir miyim?" → max_price DEĞİL (yeterlilik sorusu)
+  const affordabilityNotBudget =
+    looksLikeAffordabilityQuestion(message) &&
+    !/(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:altı|altında|kadar)/i.test(text) &&
+    !/(en fazla|maksimum|max\.?)\s*\d+/i.test(text);
 
   // "1000 TL altı", "bende 1000 lira var", "1000 liram var"
   const maxPatterns = [
@@ -577,13 +651,15 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     /(?:bende|elimde)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira(?:m|mız|nız)?|try)?\s*var/i,
   ];
 
-  for (const pattern of maxPatterns) {
-    const match = text.match(pattern);
-    if (match?.[1]) {
-      const value = Number(match[1].replace(',', '.'));
-      if (Number.isFinite(value) && value > 0) {
-        filters.max_price = value;
-        break;
+  if (!affordabilityNotBudget) {
+    for (const pattern of maxPatterns) {
+      const match = text.match(pattern);
+      if (match?.[1]) {
+        const value = Number(match[1].replace(',', '.'));
+        if (Number.isFinite(value) && value > 0) {
+          filters.max_price = value;
+          break;
+        }
       }
     }
   }
@@ -1973,6 +2049,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
 9. SAYISAL/FİYAT/KARGO KARŞILAŞTIRMALARINDA TUTARLILIK (ÇOK ÖNEMLİ): Kullanıcı bir tutarın eşik altında/üstünde olup olmadığını sorduğunda ÖNCE aritmetik yap, SONRA cevapla. "Evet"/"Hayır" ile açıklama ASLA çelişmesin.
    KARGO ÖRNEĞİ: Ücretsiz kargo eşiği 750 TL. 720 TL → Hayır, ücretsiz değil (720 < 750). 800 TL → Evet, ücretsiz (800 ≥ 750). Bağlamda "KARGO ÜCRETSİZ EŞİĞİ" ipucu varsa ona uy.
    KISMİ İADE + GİDEN KARGO: "2 ürün aldım, birini iade ettim, ücretsiz kargoyu iademden kesiyorlar" → Sipariş anı eşiğini kısaca söyle; giden kargonun iade tutarından düşülmesi belgede ayrıca yok → kesin kesilir/kesilmez DEME; iletişime yönlendir. "Yasal mı?" için hukuk hükmü verme. Bağlamda "KISMİ İADE + GİDEN KARGO" ipucu varsa ona uy; "KARGO ÜCRETSİZ EŞİĞİ → ÜCRETSİZ" ipucunu bu senaryoya uygulama.
+   BÜTÇE / "ELİMDE X TL VAR" (ÇOK ÖNEMLİ): Kullanıcı belirli bir ürün için "elimde 5311 TL var, alabilir miyim?" / "5311'e neden alamam?" derse: X ≥ satış fiyatı → EVET (ödeme sabit fiyattan alınır; fazla para sorun değil). X < fiyat → HAYIR + farkı söyle. 5311 > 5310 iken "Hayır alamazsınız" / "5311 alt teklif" / "sabit fiyat yüzünden 5311 kabul edilmez" DEME. "X TL altı ürün var mı?" katalog filtresidir; "elimde X var bu ürünü alayım mı?" yeterlilik sorusudur — karıştırma.
 10. SAYISAL YANIT HASSASİYETİ (İSTENEN ADET vs GERÇEK SONUÇ — ÇOK ÖNEMLİ): Kullanıcı belirli bir sayıda ürün istediğinde (örn. "en ucuz 3 ürün", "en pahalı 5 çerçeve") ve search_products / bağlam sonucunda istenenden DAHA AZ ürün döndüğünde, bunu ASLA gizleme veya yumuşatma. Metin yanıtında veritabanında/sonuçta TOPLAM kaç ürün bulunduğunu AÇIKÇA belirt. Belirsiz/yanıltıcı ifadeler YASAK:
    - YANLIŞ: "Evet, en ucuz kaldırım panolarımızdan biri aşağıda..." (sanki daha fazlası varmış gibi)
    - YANLIŞ: "İşte birkaç örnek..." / "en ucuz 3 ürünümüzden biri..."
@@ -2105,7 +2182,8 @@ export async function POST(req: NextRequest) {
     );
     const isReferentialFollowUp =
       !acceptAlternateCategory &&
-      looksLikeProductFollowUp(message) &&
+      (looksLikeProductFollowUp(message) ||
+        looksLikeAffordabilityQuestion(message)) &&
       cleanHistory.length > 0;
 
     // Ürün başlıklarını her zaman çek: "Bilgi al" tıklamasında mevcut mesajda
@@ -2308,6 +2386,20 @@ export async function POST(req: NextRequest) {
       const productDocs = documents.filter((doc) => doc.metadata?.type === 'product');
       hasProductCards = wantsCardWithDetail && productDocs.length > 0;
 
+      // "5311 TL elimde var alabilir miyim?" → fiyat ile karşılaştır; model "sabit fiyat" uydurmasın
+      const affordAmount =
+        looksLikeAffordabilityQuestion(message)
+          ? extractAffordabilityAmount(message)
+          : null;
+      const affordReply =
+        affordAmount != null && productDocs[0]
+          ? buildAffordabilityReply(affordAmount, productDocs[0])
+          : null;
+
+      if (affordReply) {
+        rawReply = affordReply;
+        hasProductCards = false;
+      } else {
       // "profil kalınlığı ne?" → metadata'da varsa kesin cevap (content'te olmayabilir)
       let propertyGuard = '';
       if (/(profil|kalınl[ıi]k|kaç\s*mm)/i.test(message)) {
@@ -2363,6 +2455,7 @@ export async function POST(req: NextRequest) {
       }
       if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
         rawReply = `${rawReply}\n\n${PRODUCT_CARDS_PLACEHOLDER}`;
+      }
       }
     } else {
     // Kullanıcı mesajı KISA ve doğrudan bilinen bir kategori adını içeriyorsa
