@@ -52,13 +52,54 @@ function isLowValuePolicyChunk(doc: MatchedDocument): boolean {
 }
 
 /**
+ * Selamlaşma / kimlik / nezaket — cevap sistem prompt'undan gelir; kaynak gösterme.
+ */
+function looksLikeGreetingOrChitchat(message: string): boolean {
+  const text = message.toLocaleLowerCase('tr-TR').trim();
+  if (!text) return true;
+
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+
+  if (
+    /^(merhaba|selam|selamlar|hey|hi|hello|günaydın|iyi\s*akşamlar|iyi\s*günler|slm)[\s!.?]*$/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+
+  // "merhaba sen kimsin", "sen kimsin?", "kimsin"
+  if (
+    wordCount <= 10 &&
+    /(sen\s+kimsin|kimsin|adın\s+ne|adın\s+nedir|ne\s+yapıyorsun|nasılsın|kim\s+olduğunu)/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /^(teşekkür(?:ler)?|sağ\s*ol|sağol|tamam|ok|okay|peki|eyvallah)[\s!.?]*$/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Yanıtta kullanılan ürün/politika kayıtlarını UI "Kaynaklar" paneli için hazırlar.
  * Ürün kartlı cevaplarda ürünler; aksi halde bağlamdaki policy (+ varsa ürün) chunk'ları.
+ * Selamlaşma/kimlik sorularında boş döner (kaynak yanıltıcı olmasın).
  */
 function buildCitationSources(
   documents: MatchedDocument[],
-  hasProductCards: boolean
+  hasProductCards: boolean,
+  message: string
 ): MatchedDocument[] {
+  if (looksLikeGreetingOrChitchat(message)) return [];
   if (!documents.length) return [];
 
   const seen = new Set<string>();
@@ -2638,7 +2679,7 @@ export async function POST(req: NextRequest) {
     const activeConversationId = conversationResult?.id ?? null;
 
     // Cevapta kullanılan urunler.csv / politikalar.md kayıtlarını kaynak olarak dön.
-    const citationSources = buildCitationSources(documents, hasProductCards);
+    const citationSources = buildCitationSources(documents, hasProductCards, message);
 
     if (activeConversationId) {
       const { error: insertError } = await supabase.from('messages').insert([
