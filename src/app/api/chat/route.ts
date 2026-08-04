@@ -88,6 +88,7 @@ const POLICY_KEYWORDS = [
   'hasar', 'kirik', 'kırık', 'tutanak', 'yanlis urun', 'yanlış ürün',
   'adres', 'yanlis adres', 'yanlış adres', 'ikinci kargo',
   'dava', 'toplu dava', 'avukat', 'mahkeme', 'ihtilaf', 'uyuşmazlık',
+  'almanya', 'avrupa', 'ab cayma', 'yurt dışı', 'yurtdışı',
   'iletisim', 'iletişim', 'sikayet', 'şikayet', 'sozlesme', 'sözleşme',
   'tahkim', 'sms', 'politika', 'hasarli', 'hasarlı', 'kusurlu', 'yasal',
 ];
@@ -799,6 +800,28 @@ function returnPolicyHint(message: string): string {
 }
 
 /**
+ * Yurt dışı / AB cayma / "tanıdık getirsin" senaryosu.
+ * ORES yurt dışına göndermez; kişisel taşıma ≠ AB'ye şirket sevkiyatı.
+ */
+function internationalReturnHint(message: string): string {
+  const text = message.toLocaleLowerCase('tr-TR');
+  if (
+    !/(almanya|avrupa|ab\b|cayma|yurt dışı|yurtdışı|yurt disi|uluslararası|tanıdık|tanidik|getirt|getireceğ|getireceg|yurtdışına|yurt dışına)/i.test(
+      text
+    )
+  ) {
+    return '';
+  }
+
+  return [
+    'YURT DIŞI / AB CAYMA (KESİN): Teslimat yalnızca Türkiye içindir; ORES yurt dışına kargo yapmaz. Bunu açıkça söyle.',
+    'AB 14 gün gerekçesiz cayma: Politikada "ürünün Avrupa Birliği\'ne gönderilmesi durumunda" geçerlidir — yani ORES\'in AB\'ye sevkiyatı. Tanıdık/elden Almanya\'ya götürmek bu kapsamda varsayılmaz.',
+    'YANLIŞ: "Evet, Almanya\'da yaşadığınız için AB cayma hakkınız var" (ORES AB\'ye göndermeden).',
+    'DOĞRU: Yurt dışı gönderim yok; sipariş TR adresine teslim edilir. TR standart iade (teslimattan sonra 14 gün, kullanılmamış/orijinal ambalaj, makbuz) koşullarını özetle. Bu özel senaryo için kesin AB cayması vaat etme; sipariş detayı için iletisim@ores.com.tr / telefon yönlendir.',
+  ].join('\n');
+}
+
+/**
  * Toplu dava / tahkim / avukat tehdidi: şartları doğru ve ölçülü aktar.
  */
 function disputeLegalHint(message: string): string {
@@ -912,6 +935,7 @@ function withPolicyHints(message: string, contextText: string): string {
     undocumentedCheckoutHint(message),
     damagedProductHint(message),
     wrongAddressHint(message),
+    internationalReturnHint(message),
     disputeLegalHint(message),
     returnPolicyHint(message),
     urgentSupportHint(message),
@@ -1203,7 +1227,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; iade 14 gün; ödeme Visa/Mastercard/iyzico/havale-EFT; kapıda nakit yok; hasar→iletişim; yanlış adres→müşteri sorumluluğu. DAVA/TAHKİM: "hakkınız yok" deme; bireysel tahkim + toplu dava feragati + kendi avukat ücreti + iletişim bilgilerini ver; hukuki danışmanlık yapma. Belgede yazmayan detay için uydurma; Kural 12.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; TR iade 14 gün; ödeme kart/iyzico/havale; kapıda nakit yok; hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse; tanıdıkla götürmek için "Evet AB caymanız var" deme. DAVA/TAHKİM: ölçülü dil + iletişim. Uydurma yok; Kural 12.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
 ${
   toolActive
