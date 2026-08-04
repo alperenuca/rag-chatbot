@@ -502,6 +502,11 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     /(almak istiyorum|satın al|sipariş(?: etmek)?|alışveriş|ürün almak|alabilirim|alabilir\s*miyim|alayım|hangisini al|hangilerini al|ne alabilir)/i.test(
       text
     );
+  // "bilgi almak isterim / incelemek isterim" satın alma değil — stok=0 ürünü gizleme
+  const infoBrowseOnly =
+    /(bilgi\s*almak|hakkında\s*bilgi|incelemek|inceleyeyim|görmek\s*ister|neler\s*var)/i.test(
+      text
+    ) && !/(satın\s*al|sipariş|kaç\s*adet\s*al)/i.test(text);
 
   // "Stokta olmayan en ucuz..." → out_of_stock; purchaseIntent burada in_stock
   // zorlamamalı (aksi halde stok=0 ürünler hiç bulunamaz).
@@ -511,10 +516,11 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
       filters.sort_by = 'price_asc';
     }
   } else if (
-    /(stokta olan|stoktakiler|stokta var|sadece stok|stokta olanlar)/i.test(text) ||
-    purchaseIntent ||
-    // Bütçe sorusu genelde "ne alabilirim" anlamına gelir → stoksuz gösterme
-    filters.max_price != null
+    !infoBrowseOnly &&
+    (/(stokta olan|stoktakiler|stokta var|sadece stok|stokta olanlar)/i.test(text) ||
+      purchaseIntent ||
+      // Bütçe sorusu genelde "ne alabilirim" anlamına gelir → stoksuz gösterme
+      filters.max_price != null)
   ) {
     filters.in_stock_only = true;
   }
@@ -2033,6 +2039,30 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      // Kartlı cevapta metinde ürün adı olmayabiliyor ("kaldırım panosu… aşağıda").
+      // Takip ("evet incelemek isterim") için geçmişteki kategoride tek ürün varsa onu kilitle.
+      if (!lastProductTitle && isReferentialFollowUp) {
+        const histCategory = inferCategoryFromHistory(
+          cleanHistory,
+          message,
+          knownCategories
+        );
+        if (histCategory) {
+          const catDocs = await executeSearchProducts(supabase, knownCategories, {
+            category: histCategory,
+            limit: 5,
+          });
+          const titles = catDocs
+            .map((doc) =>
+              typeof doc.metadata?.title === 'string' ? doc.metadata.title.trim() : ''
+            )
+            .filter(Boolean);
+          if (titles.length === 1) {
+            lastProductTitle = titles[0];
+          }
+        }
+      }
+
       if (lastProductTitle) {
         const { data: pinnedRows, error: pinError } = await supabase
           .from('documents')
@@ -2129,9 +2159,16 @@ export async function POST(req: NextRequest) {
     // doğrudan o ürünün tam içeriğiyle cevap ver (kart listesi değil, metin detay).
     if (pinnedFollowUpProduct) {
       const followUpDerived = buildDerivedPromptFields(documents, false);
-      hasProductCards = false;
-      const detailOrderGuard =
-        'DETAY FORMATI (KESİN): Önce **Ürün Özellikleri** (madde madde), sonra **Fiyat/Stok**, en sonda uzun açıklama paragrafları. Uzun metni başa yazma.\n\n';
+      // "incelemek / göstermek isterim" → kart da gelsin; sadece metin detayda
+      // "aşağıda" deyip kartsız kalmasın (kaldırım panosu stok=0 senaryosu).
+      const wantsCardWithDetail =
+        /(incele|göster|kart|ürünü\s*gör|aşağıda)/i.test(message) ||
+        /^(evet|tamam|olur)\b/i.test(message.trim());
+      const productDocs = documents.filter((doc) => doc.metadata?.type === 'product');
+      hasProductCards = wantsCardWithDetail && productDocs.length > 0;
+      const detailOrderGuard = hasProductCards
+        ? `DETAY + KART (KESİN): Kısa giriş, sonra [[URUN_KARTLARI]], ardından Kural 3 sırasıyla özellikler → fiyat/stok → uzun açıklama. "Aşağıda" deyip kart/yer tutucu unutma. Stok 0 olsa bile kartı göster ("Stokta yok").\n\n`
+        : 'DETAY FORMATI (KESİN): Önce **Ürün Özellikleri** (madde madde), sonra **Fiyat/Stok**, en sonda uzun açıklama. "Aşağıda inceleyebilirsiniz" deyip boş bırakma — metinde özellikleri yaz. Uzun metni başa yazma.\n\n';
 
       const followUpCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
@@ -2141,9 +2178,9 @@ export async function POST(req: NextRequest) {
             content: buildSystemPrompt({
               knownCategoriesText,
               contextText: `${detailOrderGuard}${followUpDerived.contextText}`,
-              hasProductCards: false,
+              hasProductCards,
               isAmbiguousGenericQuery: false,
-              toolActive: false,
+              toolActive: hasProductCards,
               pinnedFollowUpProduct: true,
               userMessage: message,
               extraContextPrefix: shippingCartPrefix,
@@ -2156,6 +2193,9 @@ export async function POST(req: NextRequest) {
       });
 
       rawReply = followUpCompletion.choices[0].message.content ?? '';
+      if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
+        rawReply = `${rawReply}\n\n${PRODUCT_CARDS_PLACEHOLDER}`;
+      }
     } else {
     // Kullanıcı mesajı KISA ve doğrudan bilinen bir kategori adını içeriyorsa
     // (örn. botun "Afiş Çerçevesi mi, Kaldırım Panosu mu?" sorusuna sadece
@@ -2715,6 +2755,20 @@ export async function POST(req: NextRequest) {
             limit: 200,
           }))
         );
+      }
+      // Kategori sadece stok=0 ürün içeriyorsa in_stock filtresi boş döndürür →
+      // "aşağıda" deyip kartsız kalmayı önlemek için stoksuzları da getir.
+      if (categoryResultDocs.length === 0 && messageFilters.in_stock_only) {
+        for (const category of directCategoryMatches) {
+          categoryResultDocs.push(
+            ...(await executeSearchProducts(supabase, knownCategories, {
+              category,
+              ...messageFilters,
+              in_stock_only: false,
+              limit: 200,
+            }))
+          );
+        }
       }
       const seen = new Set<string>();
       documents = categoryResultDocs.filter((doc) => {
