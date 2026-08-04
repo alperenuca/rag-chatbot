@@ -910,12 +910,65 @@ function extractExplicitCartAmountTl(message: string): number | null {
 }
 
 /**
+ * Kısmi iade sonrası "ücretsiz kargo iade tutarından kesilsin mi?" tuzağı.
+ * Sipariş anı eşiği (750) ile karıştırılmamalı; kesilir/kesilmez uydurulmamalı.
+ */
+function looksLikePartialReturnShippingDispute(message: string): boolean {
+  const text = message.toLocaleLowerCase('tr-TR');
+  if (!/\biade\b/.test(text)) return false;
+  const shipping =
+    /(kargo|ücretsiz kargo|ucretsiz kargo|kargo ücretsiz|kargo ucretsiz)/i.test(text);
+  if (!shipping) return false;
+  const disputeOrDeduct =
+    /(kes|düş|dus|çıkar|cikar|yasal|haklı|hakli|doğru mu|dogru mu|geri alın|geri alin|iademden|iade tutar)/i.test(
+      text
+    );
+  const partialContext =
+    /(birini|bir ürün|bir urun|kısmi|kismi|kalan ürün|kalan urun|iki ürün|iki urun|2 ürün|2 urun|her biri|ürünlerden bir)/i.test(
+      text
+    );
+  return disputeOrDeduct || partialContext;
+}
+
+function partialReturnShippingHint(message: string): string {
+  if (!looksLikePartialReturnShippingDispute(message)) return '';
+
+  const asksInvoice =
+    /(fatura|e-fatura|efatura|yeni fatura|düzeltilmiş fatura|duzeltilmis fatura)/i.test(
+      message
+    );
+
+  const lines = [
+    '=== ZORUNLU CEVAP (KISMİ İADE + GİDEN KARGO ÜCRETİ) — ÖNCE BUNU UYGULA ===',
+    'YANLIŞ: "Sipariş 1000 ≥ 750 olduğu için ücretsiz kargo iade tutarından KESİLMEZ / kesilemez" diye kesin iddia — bu senaryo belgede ayrıca düzenlenmez.',
+    'YANLIŞ: "Kalan tutar 500 < 750 olduğu için kargo kesilir" diye kesin iddia — bu da belgede yok.',
+    'YANLIŞ: "Yasal / yasal değil" diye hukuk hükmü verme.',
+    'DOĞRU SIRALAMA:',
+    `1) Ücretsiz kargo eşiği ${FREE_SHIPPING_THRESHOLD_TL} TL — sipariş ANINDA sepette uygulanır; bunu kısa belirt.`,
+    '2) Kısmi iade sonrası, siparişte ücretsiz uygulanmış GİDEN kargo bedelinin para iadesinden düşülüp düşülmeyeceği belgelerimizde ayrıca yazılmıyor; kesin "kesilir/kesilmez" DEME.',
+    '3) Sipariş numarası ile teyit: iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00).',
+    '4) Usulüne uygun iade onaylandıysa para iadesi 10 iş günü (orijinal ödeme yöntemi; banka ek süre). Onaydan 15 iş günü sonra hâlâ yoksa tekrar yazın.',
+  ];
+  if (asksInvoice) {
+    lines.push(
+      '5) Kalan ürün için yeni/düzeltilmiş fatura: belgede yok → uydurma; aynı iletişim kanallarına yönlendir.'
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
  * Kargo ücretsiz eşiğiyle ilgili sorularda modele kesin aritmetik ipucu verir;
  * "720 TL ücretsiz mi?" gibi sorularda Evet/Hayır çelişkisini engeller.
+ * Kısmi iade + kargo kesintisi sorularında DEVRE DIŞI (partialReturnShippingHint).
  */
 function shippingThresholdHint(message: string): string {
   const text = message.toLocaleLowerCase('tr-TR');
   if (!/(kargo|ücretsiz kargo|ucretsiz kargo|kargo ücretsiz|kargo ucretsiz)/i.test(text)) {
+    return '';
+  }
+  // Kısmi iade / kargo geri alma tuzağında "1000 ≥ 750 → ÜCRETSİZ" ipucu YANLIŞ yönlendirir
+  if (looksLikePartialReturnShippingDispute(message)) {
     return '';
   }
 
@@ -949,6 +1002,7 @@ async function shippingQuantityCartHint(
   knownCategories: string[]
 ): Promise<string> {
   if (!/(kargo|ücretsiz)/i.test(message)) return '';
+  if (looksLikePartialReturnShippingDispute(message)) return '';
   const qtyMatch = message.match(/(\d+)\s*adet/i);
   if (!qtyMatch?.[1]) return '';
   // Açık TL tutarı varsa miktar×fiyat hesabına gerek yok
@@ -1022,11 +1076,15 @@ function undocumentedCheckoutHint(message: string): string {
   const asksKdv =
     /(kdv|katma\s*değer|vergi\s*oran|%\s*\d+)/i.test(text) ||
     /(fatura).{0,40}(oran|yüzde|kdv)/i.test(text);
+  const asksPartialInvoice =
+    /\bfatura\b/i.test(text) &&
+    /(iade|kısmi|kismi|kalan ürün|kalan urun|yeni fatura|düzeltil|duzeltil)/i.test(text);
   const asksCorpInvoice =
     /(kurumsal|vkn|e-fatura|efatura|şahıs kart|sahis kart|vergi\s*no|vergi\s*kimlik)/i.test(
       text
-    ) || (/\bfatura\b/i.test(text) && !asksKdv);
-  if (!asksPrint && !asksCorpInvoice && !asksKdv) return '';
+    ) ||
+    (/\bfatura\b/i.test(text) && !asksKdv && !asksPartialInvoice);
+  if (!asksPrint && !asksCorpInvoice && !asksKdv && !asksPartialInvoice) return '';
 
   // KDV oranı sorusu: zorunlu iskelet (model %18 vb. uydurmasın)
   if (asksKdv) {
@@ -1038,6 +1096,14 @@ function undocumentedCheckoutHint(message: string): string {
       '2) Kurumsal fatura / VKN yeterli mi gibi detaylar da belgede net değilse aynı şekilde uydurma; teyit için iletişime yönlendir.',
       '3) Bilinen şirket vergi no (6450038153) belgede geçiyorsa paylaşabilirsin; bu bir KDV oranı DEĞİLDİR.',
       '4) iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00) ver.',
+    ].join('\n');
+  }
+
+  if (asksPartialInvoice) {
+    return [
+      '=== ZORUNLU CEVAP (KISMİ İADE / YENİ FATURA) — ÖNCE BUNU UYGULA ===',
+      'YANLIŞ: "Evet yeni fatura kesilir" / "Hayır kesilmez" diye kesin iddia — belgede yok.',
+      'DOĞRU: Kısmi iade sonrası kalan ürün için yeni/düzeltilmiş fatura belgelerimizde geçmiyor; teyit için iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00).',
     ].join('\n');
   }
 
@@ -1297,6 +1363,7 @@ function urgentSupportHint(message: string): string {
 function withPolicyHints(message: string, contextText: string): string {
   // En kritik / çakışmaya açık ipuçları önce (model FAQ parçasına kaymasın)
   const hints = [
+    partialReturnShippingHint(message),
     undocumentedCheckoutHint(message),
     childDataHint(message),
     urgentSupportHint(message),
@@ -1614,6 +1681,7 @@ SIRALAMA ÖNCELİĞİ: "En ağır hangisi ve en ucuz mu?" → önce en ağırı 
 Örnek KAPSAM İÇİ (kapıda nakit / IBAN): "Kapıda nakit ödeyebilir miyim? Havale IBAN nerede?" → Kapıda nakit YOK (Hayır); kabul edilenler Visa/Mastercard/iyzico/havale-EFT; IBAN uydurma, iletişime yönlendir.
 Örnek KAPSAM İÇİ (acil / mesai dışı): "Saat 21:00 acil sipariş değişikliği, telefon açılmıyor / iade edip yeniden mi alayım?" → Empati; telefon 08:00–18:00; iletisim@ores.com.tr + yarın telefon; ASLA "önce iade edip yeni sipariş verin" deme.
 Örnek KAPSAM İÇİ (Kağıthane'ye iade kargosu): "Merkeze kargoladım, para ne zaman?" → Önce: iade adresi Sakarya/Arifiye (Kağıthane değil); talep+etiketsiz kabul edilmeyebilir; hemen iletişim. "10 iş günü"yi usulüne uygun onay sonrası ikincil bilgi yap.
+Örnek KAPSAM İÇİ (kısmi iade + ücretsiz kargo kesintisi): "2×500=1000 TL aldım, birini iade ettim, kargoyu iademden kesiyorlar, yasal mı? Yeni fatura?" → Eşik 750 sipariş anı; giden kargo kesintisi + yeni fatura belgede yok → kesin kesilir/kesilmez/yasal deme; 10 iş günü iade + iletişime yönlendir.
 Örnek KAPSAM İÇİ (çocuk verisi): "15 yaş oğlum hesap açtı, verilerini silin" → §6.8: çocuklara yönelik değil; ebeveyn silebilir; 16 yaş altı notu; e-posta+telefon. Sadece "mail atın" yetmez.
 Örnek KAPSAM İÇİ (özel ölçü): "120x240 ışıklı stand" → reddetme; katalogda yoksa söyle; "üretiriz/üretmeyiz" uydurma; iletişim ver.
 Örnek KAPSAM İÇİ (baskı): "afiş baskısı yapıyor musunuz?" → reddetme. Belgede hizmet yoksa: "Kataloğumuzda/politika metninde afiş baskı hizmeti geçmiyor" de. "Yapıyoruz / yapmıyoruz / mümkün" diye KESİN iddia UYDURMA; teyit için Kural 12 iletişim ver.
@@ -1656,13 +1724,14 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
 8. HİÇBİR ÜRÜNÜ ATLAMA: Kullanıcı bir kategorideki/kritere uyan ürünleri sorduğunda, sonuçta kaç ürün varsa (5, 10, 27 fark etmez) TÜMÜ otomatik olarak kartlarda gösterilir; giriş cümlende "birkaç örnek" gibi ifadelerle sayıyı azaltıyormuş gibi konuşma, TÜM sonuçlardan bahset.
 9. SAYISAL/FİYAT/KARGO KARŞILAŞTIRMALARINDA TUTARLILIK (ÇOK ÖNEMLİ): Kullanıcı bir tutarın eşik altında/üstünde olup olmadığını sorduğunda ÖNCE aritmetik yap, SONRA cevapla. "Evet"/"Hayır" ile açıklama ASLA çelişmesin.
    KARGO ÖRNEĞİ: Ücretsiz kargo eşiği 750 TL. 720 TL → Hayır, ücretsiz değil (720 < 750). 800 TL → Evet, ücretsiz (800 ≥ 750). Bağlamda "KARGO ÜCRETSİZ EŞİĞİ" ipucu varsa ona uy.
+   KISMİ İADE + GİDEN KARGO: "2 ürün aldım, birini iade ettim, ücretsiz kargoyu iademden kesiyorlar" → Sipariş anı eşiğini kısaca söyle; giden kargonun iade tutarından düşülmesi belgede ayrıca yok → kesin kesilir/kesilmez DEME; iletişime yönlendir. "Yasal mı?" için hukuk hükmü verme. Bağlamda "KISMİ İADE + GİDEN KARGO" ipucu varsa ona uy; "KARGO ÜCRETSİZ EŞİĞİ → ÜCRETSİZ" ipucunu bu senaryoya uygulama.
 10. SAYISAL YANIT HASSASİYETİ (İSTENEN ADET vs GERÇEK SONUÇ — ÇOK ÖNEMLİ): Kullanıcı belirli bir sayıda ürün istediğinde (örn. "en ucuz 3 ürün", "en pahalı 5 çerçeve") ve search_products / bağlam sonucunda istenenden DAHA AZ ürün döndüğünde, bunu ASLA gizleme veya yumuşatma. Metin yanıtında veritabanında/sonuçta TOPLAM kaç ürün bulunduğunu AÇIKÇA belirt. Belirsiz/yanıltıcı ifadeler YASAK:
    - YANLIŞ: "Evet, en ucuz kaldırım panolarımızdan biri aşağıda..." (sanki daha fazlası varmış gibi)
    - YANLIŞ: "İşte birkaç örnek..." / "en ucuz 3 ürünümüzden biri..."
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma, çocuk verisi/ebeveyn silme, KDV/fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; TR iade 14 gün (önce talep+etiket; adres Sakarya/Arifiye — Kağıthane iade adresi değil; talepsiz gönderim kabul edilmeyebilir); para iadesi onay sonrası 10 iş günü. Ödeme kart/iyzico/havale; kapıda nakit yok; KDV oranı belgede yok → "%18" UYDURMA, iletişime yönlendir. hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse. ÇOCUK VERİSİ: §6.8 + iletişim. DAVA/TAHKİM: ölçülü dil. Uydurma yok; Kural 12.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma, çocuk verisi/ebeveyn silme, KDV/fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 (sipariş anı); kısmi iadede giden kargo kesintisi belgede yok → uydurma; TR iade 14 gün (önce talep+etiket; adres Sakarya/Arifiye — Kağıthane iade adresi değil; talepsiz gönderim kabul edilmeyebilir); para iadesi onay sonrası 10 iş günü. Ödeme kart/iyzico/havale; kapıda nakit yok; KDV oranı / kısmi iade yeni fatura belgede yok → uydurma, iletişime yönlendir. hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse. ÇOCUK VERİSİ: §6.8 + iletişim. DAVA/TAHKİM: ölçülü dil; "yasal mı" için mahkeme hükmü yok. Uydurma yok; Kural 12.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
 ${
   toolActive

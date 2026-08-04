@@ -154,10 +154,22 @@ async function processProducts() {
 async function processPolicies() {
   const filePath = path.join(process.cwd(), 'data', 'politikalar.md');
   const fileContent = fs.readFileSync(filePath, 'utf-8');
-  
+
+  console.log('🧹 Supabase\'deki mevcut politika kayıtları temizleniyor...');
+  const { error: deleteError } = await supabase
+    .from('documents')
+    .delete()
+    .eq('metadata->>source', 'politikalar.md');
+
+  if (deleteError) {
+    console.error('❌ Eski politika verileri silinirken hata oluştu:', deleteError.message);
+  } else {
+    console.log('✅ Eski politika verileri temizlendi.');
+  }
+
   // Başlıklara göre (##) politikayı parçala (Chunking)
   const sections = fileContent.split(/(?=^##\s)/m);
-  
+
   console.log(`📄 ${sections.length} adet politika bölümü işleniyor...`);
 
   for (const section of sections) {

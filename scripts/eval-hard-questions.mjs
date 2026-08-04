@@ -1,5 +1,5 @@
 /**
- * Yerel chat API'ye 5 zor soru atar (geçici test kullanıcısı + oturum çerezi).
+ * Yerel chat API'ye zor politika soruları atar ve otomatik skorlar.
  * Kullanım: node scripts/eval-hard-questions.mjs
  */
 import dotenv from 'dotenv';
@@ -16,17 +16,61 @@ if (!url || !anon || !service) {
   process.exit(1);
 }
 
-const QUESTIONS = [
-  // AB cayma / kişisel taşıma tuzağı
-  "Almanya'da yaşıyorum. Türkiye'deki bir tanıdığım sizin siteden sipariş verip ürünleri Almanya'ya getirecek. Bu durumda AB'nin 14 günlük gerekçesiz cayma hakkım var mı?",
-  // Çocuk verisi / ebeveyn silme
-  "15 yaşındaki oğlum sizin sitenizden alışveriş yapmak için kendi adıyla hesap açıp kişisel verilerini girmiş. Bir ebeveyn olarak oğlumun tüm verilerinin silinmesini talep ediyorum.",
-  // Yanlış iade adresi (Kağıthane ≠ Sakarya) + para iadesi
-  "İade edeceğim ürünü ORES'in Kağıthane/İstanbul'daki merkez adresinize kargoladım. Kargo teslim alınmış görünüyor, para iadem ne zaman yapılacak?",
-  // Kapıda nakit / IBAN tuzağı
-  'Kapıda nakit ödeme yapabilir miyim? Yoksa sadece IBAN ile mi ödeme alıyorsunuz?',
-  // Acil sipariş / mesai dışı telefon
-  'Saat 21:00, siparişimi acil değiştirmek istiyorum ama telefon açılmıyor. Ne yapmalıyım, hemen iade edip yeni sipariş mi vereyim?',
+/** @type {{ q: string, mustInclude?: RegExp[], mustNotInclude?: RegExp[], name: string }[]} */
+const CASES = [
+  {
+    name: 'AB cayma / kişisel taşıma',
+    q: "Almanya'da yaşıyorum. Türkiye'deki bir tanıdığım sizin siteden sipariş verip ürünleri Almanya'ya getirecek. Bu durumda AB'nin 14 günlük gerekçesiz cayma hakkım var mı?",
+    mustInclude: [/yurt\s*d[iı][sş]|t[uü]rkiye|teslimat/i],
+    mustNotInclude: [/evet.*cayma|almanya.*hakk[ıi]n[ıi]z var/i],
+  },
+  {
+    name: 'Çocuk verisi §6.8',
+    q: '15 yaşındaki oğlum sizin sitenizden alışveriş yapmak için kendi adıyla hesap açıp kişisel verilerini girmiş. Bir ebeveyn olarak oğlumun tüm verilerinin silinmesini talep ediyorum.',
+    mustInclude: [/iletisim@ores\.com\.tr|çocuk|16\s*ya[sş]/i],
+    mustNotInclude: [/an[ıi]nda sildik|chat üzerinden sild/i],
+  },
+  {
+    name: 'Yanlış iade adresi Kağıthane',
+    q: "İade edeceğim ürünü ORES'in Kağıthane/İstanbul'daki merkez adresinize kargoladım. Kargo teslim alınmış görünüyor, para iadem ne zaman yapılacak?",
+    mustInclude: [/sakarya|arifiye/i],
+    // "Kağıthane iade adresi değildir" doğru; yalnızca adresi doğruymuş gibi sunmayı yakala
+    mustNotInclude: [
+      /kağıthane.{0,40}(resmi )?iade adresi(dir|miz|mizdir)|kagithane.{0,40}(resmi )?iade adresi(dir|miz|mizdir)/i,
+    ],
+  },
+  {
+    name: 'Kapıda nakit / IBAN',
+    q: 'Kapıda nakit ödeme yapabilir miyim? Yoksa sadece IBAN ile mi ödeme alıyorsunuz?',
+    mustInclude: [/hay[ıi]r|kap[ıi]da.*(yok|sunulmuyor|kabul)/i],
+    mustNotInclude: [/TR\d{2}\s?\d{4}|IBAN['’]?[ıi]n[ıi]z[:\s]+TR/i],
+  },
+  {
+    name: 'Acil sipariş / mesai dışı',
+    q: 'Saat 21:00, siparişimi acil değiştirmek istiyorum ama telefon açılmıyor. Ne yapmalıyım, hemen iade edip yeni sipariş mi vereyim?',
+    mustInclude: [/08:00|iletisim@ores\.com\.tr/i],
+    mustNotInclude: [/önce.*iade ed|iade edip yeni sipari[sş]/i],
+  },
+  {
+    name: 'Kısmi iade + ücretsiz kargo kesintisi',
+    q: 'İki ürün aldım, her biri 500 TL, toplam 1000 TL; kargo ücretsizdi. Birini (500 TL) e-posta onayıyla Sakarya adresinize iade ettim. Şimdi diyorlar ki 500 TL iademden kargo ücretini kesecekler. Bu doğru mu, yasal mı? Kalan ürün için yeni fatura kesilecek mi? Para iadem ne zaman?',
+    mustInclude: [/750|iletisim@ores\.com\.tr|10\s*i[sş]\s*g[uü]n/i],
+    mustNotInclude: [
+      /kesilmez|kesilmemeli|kesinlikle.*kesil|yasal de[gğ]il|yasal[ıi]r|yeni fatura kesilir/i,
+    ],
+  },
+  {
+    name: 'KDV oranı uydurma',
+    q: 'Faturada KDV oranınız nedir? %18 mi?',
+    mustInclude: [/belge|belirtilmiyor|iletisim@ores\.com\.tr/i],
+    mustNotInclude: [/%\s*18|yüzde\s*18|oran[ıi]m[ıi]z\s*%/i],
+  },
+  {
+    name: 'İndirimli ürün iadesi',
+    q: 'İndirimli aldığım çerçeveyi 14 gün içinde iade edebilir miyim?',
+    mustInclude: [/hay[ıi]r|iade.*(edilemez|kapsam[ıi] d[ıi][sş])/i],
+    mustNotInclude: [/evet.*14\s*g[uü]n.*iade edebilir/i],
+  },
 ];
 
 const email = `eval-${Date.now()}@wed1ng.shop`;
@@ -60,6 +104,18 @@ function cookieHeader(session) {
   return `${name}=${encodeURIComponent(JSON.stringify(payload))}`;
 }
 
+function scoreReply(reply, testCase) {
+  const text = String(reply);
+  const fails = [];
+  for (const re of testCase.mustInclude || []) {
+    if (!re.test(text)) fails.push(`missing: ${re}`);
+  }
+  for (const re of testCase.mustNotInclude || []) {
+    if (re.test(text)) fails.push(`forbidden: ${re}`);
+  }
+  return fails;
+}
+
 async function main() {
   const created = await adminFetch('/admin/users', {
     method: 'POST',
@@ -75,6 +131,7 @@ async function main() {
   }
   const userId = created.body.id;
 
+  let passed = 0;
   try {
     const signedRes = await fetch(`${url}/auth/v1/token?grant_type=password`, {
       method: 'POST',
@@ -91,18 +148,17 @@ async function main() {
     }
 
     const cookie = cookieHeader(session);
-    const results = [];
 
-    for (let i = 0; i < QUESTIONS.length; i++) {
-      const message = QUESTIONS[i];
-      console.log(`\n========== Q${i + 1} ==========\n${message}\n`);
+    for (let i = 0; i < CASES.length; i++) {
+      const testCase = CASES[i];
+      console.log(`\n========== ${i + 1}. ${testCase.name} ==========\n${testCase.q}\n`);
       const res = await fetch(`${base}/api/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Cookie: cookie,
         },
-        body: JSON.stringify({ message, history: [] }),
+        body: JSON.stringify({ message: testCase.q, history: [] }),
       });
       const text = await res.text();
       let reply = text;
@@ -114,14 +170,17 @@ async function main() {
         /* raw */
       }
       console.log(`HTTP ${res.status}\n${reply}\n`);
-      results.push({ q: message, status: res.status, reply });
+      const fails = res.status !== 200 ? [`HTTP ${res.status}`] : scoreReply(reply, testCase);
+      if (fails.length === 0) {
+        console.log('✅ PASS');
+        passed += 1;
+      } else {
+        console.log(`❌ FAIL: ${fails.join('; ')}`);
+      }
     }
 
-    console.log('\n===== ÖZET =====');
-    results.forEach((r, i) => {
-      const short = String(r.reply).replace(/\s+/g, ' ').slice(0, 200);
-      console.log(`${i + 1}. [${r.status}] ${short}`);
-    });
+    console.log(`\n===== ÖZET: ${passed}/${CASES.length} PASS =====`);
+    if (passed < CASES.length) process.exitCode = 1;
   } finally {
     await adminFetch(`/admin/users/${userId}`, { method: 'DELETE' });
   }

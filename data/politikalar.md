@@ -89,6 +89,8 @@ Kargo takibi sırasında yaşanabilecek gecikme veya aksaklıklar için doğruda
 - Ürün iadelerinde kargo ücreti, iade politikasına bağlı olarak ORES veya müşteri tarafından karşılanır.
 - İade edilecek ürünlerin **kullanılmamış ve orijinal ambalajında** olması gerekmektedir. Aksi halde iade işlemi kabul edilmeyebilir.
 - Kargo firmasının iade süreçlerine ve prosedürlerine uygun hareket edilmesi gerekmektedir.
+- **Kısmi iade ve giden (sipariş) kargo ücreti:** Ücretsiz kargo eşiği (750 TL) siparişin verildiği andaki sepet tutarına göre uygulanır. Siparişin bir kısmı iade edildikten sonra, sipariş sırasında ücretsiz uygulanmış giden kargo bedelinin iade tutarından düşülüp düşülmeyeceği bu dokümanda ayrıca düzenlenmemiştir. Bu konuda kesin hüküm verilmemeli; sipariş numarası ile `iletisim@ores.com.tr` veya +90 264 531 00 10–11 üzerinden teyit edilmelidir.
+- **Kısmi iade sonrası fatura:** Kalan ürün için yeni/düzeltilmiş fatura kesilip kesilmeyeceği bu dokümanda ayrıca belirtilmez; teyit için iletişime geçilmelidir.
 
 ---
 
@@ -585,6 +587,12 @@ Bu bildirim ORES tarafından gerektiğinde güncellenebilir. Kullanıcıların g
 
 **Kargo ücreti ne kadar? Ücretsiz kargo var mı?**
 750 TL ve üzeri siparişlerde kargo ücretsizdir. 750 TL altındaki siparişlerde kargo ücreti alıcıya aittir ve sipariş sırasında sepette gösterilir. Kampanya dönemlerinde bu koşullar değişebilir.
+
+**Kısmi iade yaptım; ücretsiz kargo bedeli iade tutarımdan kesilebilir mi?**
+Ücretsiz kargo, sipariş anındaki tutarın 750 TL ve üzeri olmasına göre uygulanır. Bir veya birkaç ürün iade edildikten sonra, siparişte ücretsiz uygulanmış giden kargo bedelinin para iadesinden düşülüp düşülmeyeceği politika metninde ayrıca yazılmaz. Kesin “kesilir” veya “kesilmez” denmemeli; sipariş numarası ile iletisim@ores.com.tr veya +90 264 531 00 10–11 üzerinden teyit edilmelidir. Usulüne uygun iade onaylandıktan sonra para iadesi 10 iş günü içinde orijinal ödeme yöntemine yapılır (banka ek süre alabilir).
+
+**Kısmi iade sonrası kalan ürün için yeni fatura kesilir mi?**
+Bu detay politika metninde belirtilmez. Teyit için iletisim@ores.com.tr veya telefon ile iletişime geçilmelidir.
 
 **Siparişim ne zaman kargoya verilir?**
 Ödeme onayı alındıktan sonra 1–3 iş günü içinde kargoya teslim edilir. Yoğun dönemlerde ve resmi tatillerde bu süre uzayabilir.
