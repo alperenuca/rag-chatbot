@@ -909,15 +909,32 @@ function paymentMethodsHint(message: string): string {
 }
 
 /**
- * Belgede net yazmayan baskı/kurumsal fatura sorularında uydurma "mümkün/yapıyoruz"
- * cevaplarını engellemek için bağlam ipucu.
+ * Belgede net yazmayan baskı/kurumsal fatura/KDV sorularında uydurmayı engelle.
  */
 function undocumentedCheckoutHint(message: string): string {
   const text = message.toLocaleLowerCase('tr-TR');
   const asksPrint = /(baskı|basım|tasarım|hazır.*gönder|afiş.*yap)/i.test(text);
+  const asksKdv =
+    /(kdv|katma\s*değer|vergi\s*oran|%\s*\d+)/i.test(text) ||
+    /(fatura).{0,40}(oran|yüzde|kdv)/i.test(text);
   const asksCorpInvoice =
-    /(kurumsal|kdv|vkn|e-fatura|efatura|şahıs kart|sahis kart|fatura)/i.test(text);
-  if (!asksPrint && !asksCorpInvoice) return '';
+    /(kurumsal|vkn|e-fatura|efatura|şahıs kart|sahis kart|vergi\s*no|vergi\s*kimlik)/i.test(
+      text
+    ) || (/\bfatura\b/i.test(text) && !asksKdv);
+  if (!asksPrint && !asksCorpInvoice && !asksKdv) return '';
+
+  // KDV oranı sorusu: zorunlu iskelet (model %18 vb. uydurmasın)
+  if (asksKdv) {
+    return [
+      '=== ZORUNLU CEVAP (KDV / FATURA ORANI) — ÖNCE BUNU UYGULA ===',
+      'YANLIŞ: "%18", "%20", "%8", "standart KDV oranımız X" diye oran UYDURMA — politika metninde fatura KDV oranı YOK.',
+      'DOĞRU:',
+      '1) Belgelerimizde/politika metninde fatura KDV oranı belirtilmiyor; kesin oran söyleyemem.',
+      '2) Kurumsal fatura / VKN yeterli mi gibi detaylar da belgede net değilse aynı şekilde uydurma; teyit için iletişime yönlendir.',
+      '3) Bilinen şirket vergi no (6450038153) belgede geçiyorsa paylaşabilirsin; bu bir KDV oranı DEĞİLDİR.',
+      '4) iletisim@ores.com.tr ve +90 264 531 00 10–11 (08:00–18:00) ver.',
+    ].join('\n');
+  }
 
   const lines = [
     'BELGEDE NET OLMAYAN HİZMET/FATURA (KESİN): Aşağıdaki noktalar politika/katalog metninde ayrıntılı geçmiyorsa "yapıyoruz / yapmıyoruz / mümkün / mümkün değil" diye KESİN iddia UYDURMA.',
@@ -929,7 +946,7 @@ function undocumentedCheckoutHint(message: string): string {
   }
   if (asksCorpInvoice) {
     lines.push(
-      'Şahıs kartı + kurumsal KDV/e-fatura: Bilinen ödeme yöntemlerini (Visa, Mastercard, iyzico, havale/EFT) söyle; kurumsal fatura detayı belgede yoksa "bu detay belgelerimizde geçmiyor, teyit için iletişime geçin" de. "Mümkün / alabilirsiniz" UYDURMA.'
+      'Şahıs kartı + kurumsal KDV/e-fatura/VKN: Bilinen ödeme yöntemlerini (Visa, Mastercard, iyzico, havale/EFT) söyle; kurumsal fatura prosedürü belgede yoksa "bu detay belgelerimizde geçmiyor, teyit için iletişime geçin" de. KDV oranı UYDURMA. "Mümkün / alabilirsiniz / VKN yeter" UYDURMA.'
     );
   }
   return lines.join('\n');
@@ -1175,13 +1192,13 @@ function urgentSupportHint(message: string): string {
 function withPolicyHints(message: string, contextText: string): string {
   // En kritik / çakışmaya açık ipuçları önce (model FAQ parçasına kaymasın)
   const hints = [
+    undocumentedCheckoutHint(message),
     childDataHint(message),
     urgentSupportHint(message),
     returnPolicyHint(message),
     internationalReturnHint(message),
     shippingThresholdHint(message),
     paymentMethodsHint(message),
-    undocumentedCheckoutHint(message),
     damagedProductHint(message),
     wrongAddressHint(message),
     disputeLegalHint(message),
@@ -1488,6 +1505,7 @@ SIRALAMA ÖNCELİĞİ: "En ağır hangisi ve en ucuz mu?" → önce en ağırı 
 Örnek KAPSAM DIŞI (saf): Kullanıcı sadece "Mauro Icardi nerelidir?" derse → kibarca reddet; futbolcu biyografisi YAZMA.
 Örnek KARMA: "Galatasaray afişi için hangi ölçü uygun ve Icardi hangi takımda?" → çerçeve ölçülerini/kategoriyi öner; Icardi sorusuna cevap VERME ("sporcu bilgisi veremem").
 Örnek KAPSAM İÇİ (ödeme): "şahıs kartı + kurumsal fatura / e-fatura" → reddetme; belgede varsa söyle, yoksa uydurma, Kural 12 iletişim ver.
+Örnek KAPSAM İÇİ (KDV): "Faturada KDV oranınız nedir?" → Belgede oran YOK; "%18/%20" UYDURMA. "Belgelerimizde KDV oranı belirtilmiyor" de; iletisim@ores.com.tr + telefon ver.
 Örnek KAPSAM İÇİ (kapıda nakit / IBAN): "Kapıda nakit ödeyebilir miyim? Havale IBAN nerede?" → Kapıda nakit YOK (Hayır); kabul edilenler Visa/Mastercard/iyzico/havale-EFT; IBAN uydurma, iletişime yönlendir.
 Örnek KAPSAM İÇİ (acil / mesai dışı): "Saat 21:00 acil sipariş değişikliği, telefon açılmıyor / iade edip yeniden mi alayım?" → Empati; telefon 08:00–18:00; iletisim@ores.com.tr + yarın telefon; ASLA "önce iade edip yeni sipariş verin" deme.
 Örnek KAPSAM İÇİ (Kağıthane'ye iade kargosu): "Merkeze kargoladım, para ne zaman?" → Önce: iade adresi Sakarya/Arifiye (Kağıthane değil); talep+etiketsiz kabul edilmeyebilir; hemen iletişim. "10 iş günü"yi usulüne uygun onay sonrası ikincil bilgi yap.
@@ -1539,7 +1557,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
    - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
    - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
    İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma, çocuk verisi/ebeveyn silme soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; TR iade 14 gün (önce talep+etiket; adres Sakarya/Arifiye — Kağıthane iade adresi değil; talepsiz gönderim kabul edilmeyebilir); para iadesi onay sonrası 10 iş günü. Ödeme kart/iyzico/havale; kapıda nakit yok; hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse. ÇOCUK VERİSİ: §6.8 + iletişim. DAVA/TAHKİM: ölçülü dil. Uydurma yok; Kural 12.
+11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma, çocuk verisi/ebeveyn silme, KDV/fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750; TR iade 14 gün (önce talep+etiket; adres Sakarya/Arifiye — Kağıthane iade adresi değil; talepsiz gönderim kabul edilmeyebilir); para iadesi onay sonrası 10 iş günü. Ödeme kart/iyzico/havale; kapıda nakit yok; KDV oranı belgede yok → "%18" UYDURMA, iletişime yönlendir. hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse. ÇOCUK VERİSİ: §6.8 + iletişim. DAVA/TAHKİM: ölçülü dil. Uydurma yok; Kural 12.
 12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
 ${
   toolActive
