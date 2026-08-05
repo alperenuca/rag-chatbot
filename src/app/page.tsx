@@ -28,6 +28,7 @@ const LOCAL_PENDING_STEP: ChatTraceStep = {
 };
 
 interface StoredMessageRow {
+  id?: string;
   role: 'user' | 'assistant';
   content: string;
   sources?: ChatMessageData['sources'];
@@ -68,6 +69,7 @@ export default function Home() {
       setMessages(
         rows.length > 0
           ? rows.map((row) => ({
+              id: typeof row.id === 'string' ? row.id : undefined,
               role: row.role,
               content: row.content,
               sources: row.sources,
@@ -317,6 +319,8 @@ export default function Home() {
             citations: data.citations as DocumentSource[] | undefined,
             steps,
             streaming: false,
+            id:
+              typeof data.messageId === 'string' ? data.messageId : undefined,
           });
           return;
         }
@@ -413,6 +417,10 @@ export default function Home() {
           citations: completed?.citations as DocumentSource[] | undefined,
           steps: completed?.steps,
           streaming: false,
+          id:
+            typeof completed?.messageId === 'string'
+              ? completed.messageId
+              : undefined,
         });
       } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : 'Yanıt alınamadı.';
@@ -439,6 +447,45 @@ export default function Home() {
       void sendMessage(`${productTitle} hakkında detaylı bilgi verir misin?`);
     },
     [sendMessage]
+  );
+
+  const handleReportAnswer = useCallback(
+    async (payload: {
+      reason: string;
+      assistantReply: string;
+      userQuestion: string;
+      conversationId: string | null;
+      messageId?: string;
+    }) => {
+      const res = await fetch('/api/reports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        throw new Error(
+          typeof data.error === 'string' ? data.error : 'Rapor gönderilemedi.'
+        );
+      }
+      setMessages((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i -= 1) {
+          const msg = next[i];
+          if (msg.role !== 'assistant') continue;
+          const sameId =
+            payload.messageId && msg.id && msg.id === payload.messageId;
+          const sameContent =
+            !payload.messageId && msg.content === payload.assistantReply;
+          if (sameId || sameContent) {
+            next[i] = { ...msg, reported: true };
+            break;
+          }
+        }
+        return next;
+      });
+    },
+    []
   );
 
   // Giriş yapılmadan RAG asistanına erişilemez: önce yükleme, sonra
@@ -507,14 +554,35 @@ export default function Home() {
             )}
 
             {!historyLoading &&
-              messages.map((msg, index) => (
-                <ChatMessage
-                  key={index}
-                  message={msg}
-                  onAskAboutProduct={handleAskAboutProduct}
-                  askDisabled={loading || historyLoading}
-                />
-              ))}
+              messages.map((msg, index) => {
+                let userQuestion = '';
+                if (msg.role === 'assistant') {
+                  for (let i = index - 1; i >= 0; i -= 1) {
+                    if (messages[i].role === 'user') {
+                      userQuestion = messages[i].content;
+                      break;
+                    }
+                  }
+                }
+                return (
+                  <ChatMessage
+                    key={msg.id ?? index}
+                    message={msg}
+                    onAskAboutProduct={handleAskAboutProduct}
+                    askDisabled={loading || historyLoading}
+                    reportContext={
+                      msg.role === 'assistant' && userQuestion
+                        ? { userQuestion, conversationId }
+                        : undefined
+                    }
+                    onReport={
+                      msg.role === 'assistant' && userQuestion
+                        ? handleReportAnswer
+                        : undefined
+                    }
+                  />
+                );
+              })}
 
             <div ref={messagesEndRef} />
           </div>

@@ -5,7 +5,9 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import {
   ArrowLeft,
   Ban,
+  CheckCheck,
   ChevronDown,
+  Flag,
   Loader2,
   MailCheck,
   MailWarning,
@@ -25,6 +27,7 @@ import {
   type AdminFunnel,
   type AdminUserRow,
 } from '@/lib/admin';
+import type { AnswerReportRow, AnswerReportStatus } from '@/lib/answer-reports';
 import type { PopularQuestion, QuestionTheme } from '@/lib/popular-questions';
 
 type StatusFilter =
@@ -57,6 +60,16 @@ type QuestionsResponse = {
   error?: string;
 };
 
+type ReportsResponse = {
+  reports: AnswerReportRow[];
+  openCount: number;
+  total: number;
+  status: string;
+  error?: string;
+};
+
+type ReportStatusFilter = AnswerReportStatus | 'all';
+
 function formatDate(value: string | null) {
   if (!value) return '—';
   try {
@@ -85,6 +98,13 @@ export default function AdminPage() {
   const [questionsLoading, setQuestionsLoading] = useState(false);
   const [questionsError, setQuestionsError] = useState<string | null>(null);
   const [banBusyId, setBanBusyId] = useState<string | null>(null);
+  const [reportsOpen, setReportsOpen] = useState(true);
+  const [reportStatus, setReportStatus] = useState<ReportStatusFilter>('open');
+  const [reportsData, setReportsData] = useState<ReportsResponse | null>(null);
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [reportsError, setReportsError] = useState<string | null>(null);
+  const [reportBusyId, setReportBusyId] = useState<string | null>(null);
+  const [expandedReportId, setExpandedReportId] = useState<string | null>(null);
 
   const filteredQuestions = useMemo(() => {
     const list = questionsData?.questions ?? [];
@@ -150,6 +170,28 @@ export default function AdminPage() {
     }
   }, [user, questionDays]);
 
+  const loadReports = useCallback(async () => {
+    if (!user || !isAdminEmail(user.email)) return;
+
+    setReportsLoading(true);
+    setReportsError(null);
+    try {
+      const res = await fetch(
+        `/api/admin/reports?status=${reportStatus}&limit=50`
+      );
+      const json = (await res.json()) as ReportsResponse;
+      if (!res.ok) {
+        throw new Error(json.error || 'Raporlar yüklenemedi.');
+      }
+      setReportsData(json);
+    } catch (err) {
+      setReportsData(null);
+      setReportsError(err instanceof Error ? err.message : 'Beklenmeyen bir hata oluştu.');
+    } finally {
+      setReportsLoading(false);
+    }
+  }, [user, reportStatus]);
+
   useEffect(() => {
     void loadUsers();
   }, [loadUsers]);
@@ -158,6 +200,37 @@ export default function AdminPage() {
     if (!questionsOpen) return;
     void loadQuestions();
   }, [questionsOpen, loadQuestions]);
+
+  useEffect(() => {
+    if (!reportsOpen) return;
+    void loadReports();
+  }, [reportsOpen, loadReports]);
+
+  const updateReportStatus = useCallback(
+    async (id: string, status: AnswerReportStatus) => {
+      setReportBusyId(id);
+      setReportsError(null);
+      try {
+        const res = await fetch('/api/admin/reports', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, status }),
+        });
+        const json = (await res.json()) as { error?: string };
+        if (!res.ok) {
+          throw new Error(json.error || 'Durum güncellenemedi.');
+        }
+        await loadReports();
+      } catch (err) {
+        setReportsError(
+          err instanceof Error ? err.message : 'Beklenmeyen bir hata oluştu.'
+        );
+      } finally {
+        setReportBusyId(null);
+      }
+    },
+    [loadReports]
+  );
 
   const toggleBan = useCallback(
     async (row: AdminUserRow) => {
@@ -300,7 +373,9 @@ export default function AdminPage() {
               </div>
               <div>
                 <h1 className="text-sm font-semibold text-neutral-900">Yönetim Paneli</h1>
-                <p className="text-[11px] text-neutral-500">Kullanıcılar · aktivite · hunisi</p>
+                <p className="text-[11px] text-neutral-500">
+                  Kullanıcılar · raporlar · aktivite
+                </p>
               </div>
             </div>
           </div>
@@ -309,12 +384,15 @@ export default function AdminPage() {
             onClick={() => {
               void loadUsers();
               if (questionsOpen) void loadQuestions();
+              if (reportsOpen) void loadReports();
             }}
-            disabled={loading || questionsLoading}
+            disabled={loading || questionsLoading || reportsLoading}
             className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-xs text-neutral-600 transition hover:bg-neutral-50 disabled:opacity-50"
           >
             <RefreshCw
-              className={`h-3.5 w-3.5 ${loading || questionsLoading ? 'animate-spin' : ''}`}
+              className={`h-3.5 w-3.5 ${
+                loading || questionsLoading || reportsLoading ? 'animate-spin' : ''
+              }`}
             />
             Yenile
           </button>
@@ -371,6 +449,198 @@ export default function AdminPage() {
             <MiniStat label="Toplam sohbet" value={activity.total_conversations} />
             <MiniStat label="Toplam mesaj" value={activity.total_messages} />
           </div>
+        </section>
+
+        <section className="overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm shadow-neutral-900/5">
+          <button
+            type="button"
+            onClick={() => setReportsOpen((open) => !open)}
+            aria-expanded={reportsOpen}
+            className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-neutral-50/80"
+          >
+            <div className="flex items-center gap-2">
+              <Flag className="h-4 w-4 text-red-600" />
+              <div>
+                <h2 className="text-sm font-semibold text-neutral-900">Cevap raporları</h2>
+                <p className="text-[11px] text-neutral-400">
+                  {reportsOpen && reportsData
+                    ? `${reportsData.total} kayıt · ${reportsData.openCount} açık (bu listede)`
+                    : 'Yanlış cevap geri bildirimleri'}
+                </p>
+              </div>
+            </div>
+            <ChevronDown
+              className={`h-4 w-4 shrink-0 text-neutral-400 transition-transform duration-200 ${
+                reportsOpen ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
+
+          {reportsOpen && (
+            <div className="border-t border-neutral-100">
+              <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-[11px] text-neutral-400">Durum filtresi</p>
+                <div className="flex rounded-xl bg-neutral-100 p-1">
+                  {(
+                    [
+                      ['open', 'Açık'],
+                      ['reviewed', 'İncelendi'],
+                      ['dismissed', 'Kapatıldı'],
+                      ['all', 'Tümü'],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setReportStatus(value)}
+                      className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                        reportStatus === value
+                          ? 'bg-white text-red-600 shadow-sm'
+                          : 'text-neutral-500 hover:text-neutral-800'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {reportsError && (
+                <p className="border-t border-red-100 bg-red-50 px-4 py-3 text-sm text-red-600">
+                  {reportsError}
+                </p>
+              )}
+
+              <div className="overflow-x-auto border-t border-neutral-100">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-neutral-50 text-[11px] uppercase tracking-wide text-neutral-500">
+                    <tr>
+                      <th className="px-4 py-3 font-medium">Tarih / saat</th>
+                      <th className="px-4 py-3 font-medium">Hesap</th>
+                      <th className="px-4 py-3 font-medium">Açıklama</th>
+                      <th className="px-4 py-3 font-medium">Durum</th>
+                      <th className="px-4 py-3 font-medium">İşlem</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-100">
+                    {reportsLoading && !reportsData ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-10 text-center text-neutral-400">
+                          <Loader2 className="mx-auto h-5 w-5 animate-spin text-red-500" />
+                        </td>
+                      </tr>
+                    ) : !reportsLoading && (reportsData?.reports.length ?? 0) === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={5}
+                          className="px-4 py-10 text-center text-sm text-neutral-400"
+                        >
+                          Bu filtrede rapor yok.
+                        </td>
+                      </tr>
+                    ) : (
+                      reportsData?.reports.map((report) => {
+                        const expanded = expandedReportId === report.id;
+                        const busy = reportBusyId === report.id;
+                        return (
+                          <tr key={report.id} className="align-top hover:bg-neutral-50/80">
+                            <td className="whitespace-nowrap px-4 py-3 text-neutral-500">
+                              {formatDate(report.created_at)}
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="font-medium text-neutral-800">
+                                {report.reporter_name || '—'}
+                              </div>
+                              <div className="text-[11px] text-neutral-500">
+                                {report.reporter_email || report.user_id}
+                              </div>
+                            </td>
+                            <td className="max-w-md px-4 py-3">
+                              <p className="text-neutral-800">{report.reason}</p>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedReportId((prev) =>
+                                    prev === report.id ? null : report.id
+                                  )
+                                }
+                                className="mt-1 text-[11px] text-red-600 hover:underline"
+                              >
+                                {expanded ? 'Detayı gizle' : 'Soru / cevap detayı'}
+                              </button>
+                              {expanded && (
+                                <div className="mt-2 space-y-2 rounded-lg border border-neutral-200 bg-neutral-50 p-2 text-[11px] text-neutral-600">
+                                  <div>
+                                    <span className="font-medium text-neutral-700">Soru: </span>
+                                    {report.user_question || '—'}
+                                  </div>
+                                  <div>
+                                    <span className="font-medium text-neutral-700">Cevap: </span>
+                                    <span className="whitespace-pre-wrap">
+                                      {report.assistant_reply.slice(0, 800)}
+                                      {report.assistant_reply.length > 800 ? '…' : ''}
+                                    </span>
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <ReportStatusBadge status={report.status} />
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex flex-col gap-1">
+                                {report.status !== 'reviewed' && (
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      void updateReportStatus(report.id, 'reviewed')
+                                    }
+                                    className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
+                                  >
+                                    {busy ? (
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                      <CheckCheck className="h-3 w-3" />
+                                    )}
+                                    İncelendi
+                                  </button>
+                                )}
+                                {report.status !== 'dismissed' && (
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      void updateReportStatus(report.id, 'dismissed')
+                                    }
+                                    className="inline-flex items-center gap-1 rounded-lg border border-neutral-200 bg-white px-2 py-1 text-[11px] font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-50"
+                                  >
+                                    Kapat
+                                  </button>
+                                )}
+                                {report.status !== 'open' && (
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      void updateReportStatus(report.id, 'open')
+                                    }
+                                    className="text-left text-[11px] text-neutral-400 hover:text-red-600 disabled:opacity-50"
+                                  >
+                                    Yeniden aç
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm shadow-neutral-900/5">
@@ -786,6 +1056,26 @@ function ThemeBadge({ theme }: { theme: QuestionTheme }) {
       className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium capitalize ${styles[theme]}`}
     >
       {theme}
+    </span>
+  );
+}
+
+function ReportStatusBadge({ status }: { status: AnswerReportStatus }) {
+  const styles: Record<AnswerReportStatus, string> = {
+    open: 'bg-red-50 text-red-700',
+    reviewed: 'bg-emerald-50 text-emerald-700',
+    dismissed: 'bg-neutral-100 text-neutral-600',
+  };
+  const labels: Record<AnswerReportStatus, string> = {
+    open: 'Açık',
+    reviewed: 'İncelendi',
+    dismissed: 'Kapatıldı',
+  };
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${styles[status]}`}
+    >
+      {labels[status]}
     </span>
   );
 }

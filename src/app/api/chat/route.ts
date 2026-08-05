@@ -5054,28 +5054,38 @@ async function processChatRequest(
     const persistedSources =
       productCardSources.length > 0 ? productCardSources : citationSources;
 
+    let assistantMessageId: string | null = null;
     if (activeConversationId) {
-      const { error: insertError } = await supabase.from('messages').insert([
-        {
-          conversation_id: activeConversationId,
-          user_id: user.id,
-          role: 'user',
-          content: message,
-        },
-        {
-          conversation_id: activeConversationId,
-          user_id: user.id,
-          role: 'assistant',
-          content: reply,
-          sources: persistedSources.length > 0 ? persistedSources : null,
-        },
-      ]);
+      const { data: insertedMessages, error: insertError } = await supabase
+        .from('messages')
+        .insert([
+          {
+            conversation_id: activeConversationId,
+            user_id: user.id,
+            role: 'user',
+            content: message,
+          },
+          {
+            conversation_id: activeConversationId,
+            user_id: user.id,
+            role: 'assistant',
+            content: reply,
+            sources: persistedSources.length > 0 ? persistedSources : null,
+          },
+        ])
+        .select('id, role');
 
       if (insertError) {
         // Mesajlar kaydedilemese bile yanıtı kullanıcıya döndürmeye devam et;
         // ancak hatayı sessizce yutmayıp logla (örn. şema henüz kurulmamışsa
         // burada görünür).
         console.error('Mesajlar kaydedilemedi:', insertError);
+      } else {
+        const assistantRow = (insertedMessages ?? []).find(
+          (row) => row.role === 'assistant'
+        );
+        assistantMessageId =
+          typeof assistantRow?.id === 'string' ? assistantRow.id : null;
       }
     } else {
       console.error('Sohbet oturumu oluşturulamadığı için mesajlar kaydedilmedi.');
@@ -5089,6 +5099,7 @@ async function processChatRequest(
       conversationId: activeConversationId,
       conversationTitle: conversationResult?.title ?? null,
       steps,
+      messageId: assistantMessageId,
     });
   } catch (err: unknown) {
     console.error('Chat API Error:', err);

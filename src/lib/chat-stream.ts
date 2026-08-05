@@ -28,6 +28,8 @@ export type ChatStreamPayload = {
   conversationId: string | null;
   conversationTitle: string | null;
   steps?: ChatTraceStep[];
+  /** Kalıcı asistan mesajı id (rapor için) */
+  messageId?: string | null;
 };
 
 export type StreamWorkCallbacks = {
@@ -146,6 +148,8 @@ export function streamFromChatJsonWork(
               ? data.conversationTitle
               : null,
           steps: stepsFromBody,
+          messageId:
+            typeof data.messageId === 'string' ? data.messageId : null,
         };
 
         await send('meta', {
