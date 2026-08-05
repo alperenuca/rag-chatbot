@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   ArrowLeft,
+  Ban,
   ChevronDown,
   Loader2,
   MailCheck,
@@ -12,19 +13,27 @@ import {
   RefreshCw,
   Search,
   Shield,
+  ShieldOff,
   TrendingUp,
   Users,
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import {
   isAdminEmail,
+  isCurrentlyBanned,
   type AdminActivitySummary,
   type AdminFunnel,
   type AdminUserRow,
 } from '@/lib/admin';
 import type { PopularQuestion, QuestionTheme } from '@/lib/popular-questions';
 
-type StatusFilter = 'all' | 'confirmed' | 'unconfirmed' | 'active' | 'no_chat';
+type StatusFilter =
+  | 'all'
+  | 'confirmed'
+  | 'unconfirmed'
+  | 'active'
+  | 'no_chat'
+  | 'banned';
 type QuestionDays = 7 | 30 | 90;
 
 type UsersResponse = {
@@ -75,6 +84,7 @@ export default function AdminPage() {
   const [questionsData, setQuestionsData] = useState<QuestionsResponse | null>(null);
   const [questionsLoading, setQuestionsLoading] = useState(false);
   const [questionsError, setQuestionsError] = useState<string | null>(null);
+  const [banBusyId, setBanBusyId] = useState<string | null>(null);
 
   const filteredQuestions = useMemo(() => {
     const list = questionsData?.questions ?? [];
@@ -148,6 +158,70 @@ export default function AdminPage() {
     if (!questionsOpen) return;
     void loadQuestions();
   }, [questionsOpen, loadQuestions]);
+
+  const toggleBan = useCallback(
+    async (row: AdminUserRow) => {
+      if (!user || !isAdminEmail(user.email)) return;
+      if (row.id === user.id) {
+        setError('Kendi hesabınızı yasaklayamazsınız.');
+        return;
+      }
+      if (isAdminEmail(row.email)) {
+        setError('Yönetici hesapları yasaklanamaz.');
+        return;
+      }
+
+      const banned = isCurrentlyBanned(row.banned_until);
+      const label = row.email || row.full_name || row.id;
+      const ok = window.confirm(
+        banned
+          ? `"${label}" yasağını kaldırmak istiyor musunuz?`
+          : `"${label}" hesabını yasaklamak istiyor musunuz? Bu kullanıcı giriş yapamaz ve sohbet kullanamaz.`
+      );
+      if (!ok) return;
+
+      setBanBusyId(row.id);
+      setError(null);
+      try {
+        const res = await fetch('/api/admin/users', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: row.id,
+            action: banned ? 'unban' : 'ban',
+          }),
+        });
+        const json = (await res.json()) as {
+          error?: string;
+          banned_until?: string | null;
+          banned?: boolean;
+        };
+        if (!res.ok) {
+          throw new Error(json.error || 'İşlem başarısız.');
+        }
+        setData((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            users: prev.users.map((u) =>
+              u.id === row.id
+                ? { ...u, banned_until: json.banned_until ?? null }
+                : u
+            ),
+          };
+        });
+        // Yasaklı filtresindeyse veya durum değiştiyse listeyi yenile
+        if (status === 'banned') {
+          void loadUsers();
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Beklenmeyen bir hata oluştu.');
+      } finally {
+        setBanBusyId(null);
+      }
+    },
+    [user, status, loadUsers]
+  );
 
   if (authLoading) {
     return (
@@ -465,6 +539,7 @@ export default function AdminPage() {
                 ['unconfirmed', 'Bekleyen'],
                 ['active', 'Aktif 7g'],
                 ['no_chat', 'Sohbetsiz'],
+                ['banned', 'Yasaklı'],
               ] as const
             ).map(([value, label]) => (
               <button
@@ -507,45 +582,61 @@ export default function AdminPage() {
                 <tr>
                   <th className="px-4 py-3 font-medium">Ad</th>
                   <th className="px-4 py-3 font-medium">E-posta</th>
-                  <th className="px-4 py-3 font-medium">Doğrulama</th>
+                  <th className="px-4 py-3 font-medium">Durum</th>
                   <th className="px-4 py-3 font-medium">Sohbet</th>
                   <th className="px-4 py-3 font-medium">Mesaj</th>
                   <th className="px-4 py-3 font-medium">Son aktivite</th>
                   <th className="px-4 py-3 font-medium">Kayıt</th>
+                  <th className="px-4 py-3 font-medium">İşlem</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100">
                 {loading && !data ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-neutral-400">
+                    <td colSpan={8} className="px-4 py-10 text-center text-neutral-400">
                       <Loader2 className="mx-auto h-5 w-5 animate-spin text-red-500" />
                     </td>
                   </tr>
                 ) : data && data.users.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-sm text-neutral-400">
+                    <td colSpan={8} className="px-4 py-10 text-center text-sm text-neutral-400">
                       Eşleşen kullanıcı yok.
                     </td>
                   </tr>
                 ) : (
                   data?.users.map((row) => {
                     const confirmed = Boolean(row.email_confirmed_at);
+                    const banned = isCurrentlyBanned(row.banned_until);
+                    const isSelf = row.id === user.id;
+                    const rowIsAdmin = isAdminEmail(row.email);
+                    const busy = banBusyId === row.id;
                     return (
-                      <tr key={row.id} className="hover:bg-neutral-50/80">
+                      <tr
+                        key={row.id}
+                        className={`hover:bg-neutral-50/80 ${banned ? 'bg-red-50/40' : ''}`}
+                      >
                         <td className="px-4 py-3 font-medium text-neutral-800">
                           {row.full_name || '—'}
                         </td>
                         <td className="px-4 py-3 text-neutral-600">{row.email || '—'}</td>
                         <td className="px-4 py-3">
-                          <span
-                            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${
-                              confirmed
-                                ? 'bg-emerald-50 text-emerald-700'
-                                : 'bg-amber-50 text-amber-700'
-                            }`}
-                          >
-                            {confirmed ? 'Doğrulandı' : 'Bekliyor'}
-                          </span>
+                          <div className="flex flex-wrap gap-1">
+                            {banned ? (
+                              <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-medium text-red-700">
+                                Yasaklı
+                              </span>
+                            ) : (
+                              <span
+                                className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                                  confirmed
+                                    ? 'bg-emerald-50 text-emerald-700'
+                                    : 'bg-amber-50 text-amber-700'
+                                }`}
+                              >
+                                {confirmed ? 'Doğrulandı' : 'Bekliyor'}
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="px-4 py-3 tabular-nums text-neutral-700">
                           {row.conversation_count}
@@ -558,6 +649,33 @@ export default function AdminPage() {
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap text-neutral-500">
                           {formatDate(row.created_at)}
+                        </td>
+                        <td className="px-4 py-3">
+                          {isSelf || rowIsAdmin ? (
+                            <span className="text-[11px] text-neutral-400">
+                              {isSelf ? 'Siz' : 'Yönetici'}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={busy || loading}
+                              onClick={() => void toggleBan(row)}
+                              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-50 ${
+                                banned
+                                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                  : 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100'
+                              }`}
+                            >
+                              {busy ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : banned ? (
+                                <ShieldOff className="h-3 w-3" />
+                              ) : (
+                                <Ban className="h-3 w-3" />
+                              )}
+                              {banned ? 'Yasağı kaldır' : 'Yasakla'}
+                            </button>
+                          )}
                         </td>
                       </tr>
                     );

@@ -30,7 +30,34 @@ export async function proxy(request: NextRequest) {
   );
 
   // Oturumu her istekte tazele; süresi dolan access token varsa burada yenilenir.
-  await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  // Yasaklı kullanıcıyı oturumdan düşür (admin ban sonrası aktif JWT kalsın diye).
+  const bannedUntil = (user as { banned_until?: string | null } | null)?.banned_until;
+  if (bannedUntil && new Date(bannedUntil).getTime() > Date.now()) {
+    await supabase.auth.signOut();
+    const transferCookies = (target: NextResponse) => {
+      for (const cookie of response.cookies.getAll()) {
+        target.cookies.set(cookie.name, cookie.value);
+      }
+      return target;
+    };
+
+    if (request.nextUrl.pathname.startsWith('/api/')) {
+      return transferCookies(
+        NextResponse.json(
+          { error: 'Hesabınız yasaklandı. Destek için iletişime geçin.' },
+          { status: 403 }
+        )
+      );
+    }
+    const redirectUrl = request.nextUrl.clone();
+    redirectUrl.pathname = '/';
+    redirectUrl.search = '';
+    return transferCookies(NextResponse.redirect(redirectUrl));
+  }
 
   return response;
 }

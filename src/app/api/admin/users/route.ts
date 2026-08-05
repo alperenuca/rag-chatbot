@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  isAdminEmail,
+  isCurrentlyBanned,
+  PERMANENT_BAN_DURATION,
   type AdminActivitySummary,
   type AdminFunnel,
   type AdminUserRow,
@@ -202,6 +205,8 @@ export async function GET(request: NextRequest) {
       filtered = filtered.filter(
         (u) => Boolean(u.email_confirmed_at) && u.message_count === 0 && u.conversation_count === 0
       );
+    } else if (status === 'banned') {
+      filtered = filtered.filter((u) => isCurrentlyBanned(u.banned_until));
     }
 
     if (q) {
@@ -236,6 +241,84 @@ export async function GET(request: NextRequest) {
     });
   } catch (err) {
     console.error('GET /api/admin/users:', err);
+    const message = err instanceof Error ? err.message : 'Sunucu hatası.';
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+/**
+ * Admin: kullanıcıyı yasakla / yasağı kaldır.
+ * Body: { userId: string, action: 'ban' | 'unban' }
+ */
+export async function PATCH(request: NextRequest) {
+  const gate = await requireAdmin();
+  if (gate.error) return gate.error;
+
+  let body: { userId?: unknown; action?: unknown };
+  try {
+    body = (await request.json()) as { userId?: unknown; action?: unknown };
+  } catch {
+    return NextResponse.json({ error: 'Geçersiz istek gövdesi.' }, { status: 400 });
+  }
+
+  const userId = typeof body.userId === 'string' ? body.userId.trim() : '';
+  const action = body.action === 'ban' || body.action === 'unban' ? body.action : null;
+
+  if (!userId || !action) {
+    return NextResponse.json(
+      { error: 'userId ve action (ban|unban) gerekli.' },
+      { status: 400 }
+    );
+  }
+
+  if (userId === gate.user.id) {
+    return NextResponse.json(
+      { error: 'Kendi hesabınızı yasaklayamazsınız.' },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const admin = createAdminClient();
+    const { data: targetData, error: getError } = await admin.auth.admin.getUserById(
+      userId
+    );
+
+    if (getError || !targetData.user) {
+      return NextResponse.json({ error: 'Kullanıcı bulunamadı.' }, { status: 404 });
+    }
+
+    if (isAdminEmail(targetData.user.email)) {
+      return NextResponse.json(
+        { error: 'Yönetici hesapları yasaklanamaz.' },
+        { status: 400 }
+      );
+    }
+
+    const { data, error } = await admin.auth.admin.updateUserById(userId, {
+      ban_duration: action === 'ban' ? PERMANENT_BAN_DURATION : 'none',
+    });
+
+    if (error || !data.user) {
+      console.error('admin ban/unban:', error);
+      return NextResponse.json(
+        { error: action === 'ban' ? 'Yasaklama başarısız.' : 'Yasak kaldırılamadı.' },
+        { status: 500 }
+      );
+    }
+
+    const bannedUntil =
+      (data.user as { banned_until?: string | null }).banned_until ?? null;
+
+    return NextResponse.json({
+      ok: true,
+      userId: data.user.id,
+      action,
+      banned_until: bannedUntil,
+      banned: isCurrentlyBanned(bannedUntil),
+    });
+  } catch (err) {
+    console.error('PATCH /api/admin/users:', err);
     const message = err instanceof Error ? err.message : 'Sunucu hatası.';
     return NextResponse.json({ error: message }, { status: 500 });
   }

@@ -48,3 +48,16 @@ export function isAdminEmail(email: string | null | undefined): boolean {
   if (!email) return false;
   return getAdminEmails().includes(email.trim().toLowerCase());
 }
+
+/** Supabase Auth `banned_until` hâlâ gelecekteyse kullanıcı yasaklıdır. */
+export function isCurrentlyBanned(
+  bannedUntil: string | null | undefined
+): boolean {
+  if (!bannedUntil) return false;
+  const ts = new Date(bannedUntil).getTime();
+  if (Number.isNaN(ts)) return false;
+  return ts > Date.now();
+}
+
+/** Kalıcı ban (~100 yıl). Unban için ban_duration: 'none'. */
+export const PERMANENT_BAN_DURATION = '876000h';

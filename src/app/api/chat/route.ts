@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import type { ChatCompletionMessageParam, ChatCompletionTool } from 'openai/resources/chat/completions';
 import dotenv from 'dotenv';
+import { isCurrentlyBanned } from '@/lib/admin';
 import { createClient } from '@/lib/supabase/server';
 import {
   emitReplyChunks,
@@ -3594,6 +3595,14 @@ async function processChatRequest(
       return NextResponse.json(
         { error: 'Bu özelliği kullanmak için giriş yapmanız gerekiyor.' },
         { status: 401 }
+      );
+    }
+
+    const bannedUntil = (user as { banned_until?: string | null }).banned_until;
+    if (isCurrentlyBanned(bannedUntil)) {
+      return NextResponse.json(
+        { error: 'Hesabınız yasaklandı. Destek için iletişime geçin.' },
+        { status: 403 }
       );
     }
 
