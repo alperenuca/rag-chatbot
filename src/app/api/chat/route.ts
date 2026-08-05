@@ -645,10 +645,38 @@ function looksLikeProfileCatalogQuestion(message: string): boolean {
   }
   if (/(kaç\s*mm|mm'?lik|mmlik)/i.test(t)) return true;
   if (/hangi\s+ürün/i.test(t) && /(mm|profil|kalınl)/i.test(t)) return true;
+  if (
+    /\d{2}\s*mm/i.test(t) &&
+    /(ürünler(?:i|in|ini|imiz)?|ürünlerini|listele|göster|incele)/i.test(t)
+  ) {
+    return true;
+  }
   if (/(profil|kalınlık).{0,24}(kaç|neler|hangi|var\s*mı|mevcut)/i.test(t)) {
     return true;
   }
   return false;
+}
+
+/** "her fiyatta olabilir" → önceki profil kalsın, fiyat kısıtı kalksın. */
+function looksLikeAnyPriceFollowUp(message: string): boolean {
+  const t = message.toLocaleLowerCase('tr-TR');
+  return /(her\s+fiyat|fiyat\s+(?:fark\s*etmez|önemli\s+değil|önemsiz)|bütçe\s+(?:fark\s*etmez|yok)|fiyat\s+kısıt(?:ı|laması)?\s+yok)/i.test(
+    t
+  );
+}
+
+function inferLastRequestedProfileMm(history: HistoryTurn[]): number | null {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i].role !== 'user') continue;
+    const mm = extractClaimedProfileMm(history[i].content);
+    if (
+      mm != null &&
+      /(mm|profil|kalınl)/i.test(history[i].content)
+    ) {
+      return mm;
+    }
+  }
+  return null;
 }
 
 function extractClaimedProfileMm(message: string): number | null {
@@ -2364,8 +2392,12 @@ export async function POST(req: NextRequest) {
       message,
       cleanHistory
     );
+    const relaxedProfileMm = looksLikeAnyPriceFollowUp(message)
+      ? inferLastRequestedProfileMm(cleanHistory)
+      : null;
     const isReferentialFollowUp =
       !acceptAlternateCategory &&
+      relaxedProfileMm == null &&
       (looksLikeProductFollowUp(message) ||
         looksLikeAffordabilityQuestion(message)) &&
       cleanHistory.length > 0;
@@ -2653,31 +2685,35 @@ export async function POST(req: NextRequest) {
     // çağrısına (tool_choice kararına) ihtiyaç duymadan aynı sonuca ulaşır.
     const directCategoryMatches = isLikelyDirectCategoryBrowse(message, knownCategories);
     const messageFilters = extractSearchFiltersFromMessage(message);
+    if (relaxedProfileMm != null) {
+      messageFilters.profile_thickness_mm = relaxedProfileMm;
+      messageFilters.max_price = undefined;
+      messageFilters.min_price = undefined;
+      messageFilters.min_price_exclusive = undefined;
+    }
 
     // Profil katalog: "kaç mm var?" / "hangi ürün 35 mm?" / "her çerçeve 25 mi?"
-    if (looksLikeProfileCatalogQuestion(message)) {
-      const claimed = extractClaimedProfileMm(message);
+    if (looksLikeProfileCatalogQuestion(message) || relaxedProfileMm != null) {
+      const claimed = extractClaimedProfileMm(message) ?? relaxedProfileMm;
       const frameScoped =
         looksLikeUniversalProfileQuestion(message) || /çerçeve/i.test(message);
-      const scopeCategory = frameScoped
-        ? findMentionedCategories(message, knownCategories)[0] ??
-          inferUserCommittedCategoryFromHistory(
-            cleanHistory,
-            message,
-            knownCategories
-          ) ??
-          knownCategories.find((c) => /çerçeve/i.test(c)) ??
-          null
-        : findMentionedCategories(message, knownCategories)[0] ??
-          inferUserCommittedCategoryFromHistory(
-            cleanHistory,
-            message,
-            knownCategories
-          );
+      // Profil kataloğunda eski kategoriyi taşıma: 35 mm panodan sonra
+      // "25 mm ürünleri göster" tüm katalogda yeni ve bağımsız aramadır.
+      const explicitlyMentionedCategory =
+        findMentionedCategories(message, knownCategories)[0] ?? null;
+      const scopeCategory =
+        explicitlyMentionedCategory ??
+        (frameScoped
+          ? knownCategories.find((c) => /çerçeve/i.test(c)) ?? null
+          : null);
 
       const wantsProductForMm =
         claimed != null &&
         (/hangi\s+ürün|hangisi|var\s*mı|yok\s*mu|bulun/i.test(message) ||
+          /(ürünler(?:i|in|ini|imiz)?|ürünlerini|listele|göster|incele)/i.test(
+            message
+          ) ||
+          relaxedProfileMm != null ||
           messageFilters.profile_thickness_mm != null);
 
       if (wantsProductForMm && claimed != null) {
@@ -2708,15 +2744,7 @@ export async function POST(req: NextRequest) {
           }.`;
           hasProductCards = false;
         } else {
-          const names = documents
-            .map((doc) =>
-              typeof doc.metadata?.title === 'string' ? doc.metadata.title.trim() : ''
-            )
-            .filter(Boolean)
-            .slice(0, 5);
-          rawReply = `Evet — ${claimed} mm profil kalınlığında ${documents.length} ürün var${
-            names.length ? `: ${names.join('; ')}` : ''
-          }.\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nİlgilendiğiniz modeli inceleyelim mi?`;
+          rawReply = `Evet — ${claimed} mm profil kalınlığında ${documents.length} ürün var. Tümünü aşağıdaki kartlarda inceleyebilirsiniz.\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nİlgilendiğiniz modeli inceleyelim mi?`;
           hasProductCards = true;
         }
       } else {
@@ -3239,7 +3267,9 @@ export async function POST(req: NextRequest) {
       // Asistan menüsündeki "afiş / kaldırım" isimlerini kategori seçimi SAYMA.
       let filterCategories = findMentionedCategories(message, knownCategories);
       const categoryFromHistory =
-        filterCategories.length === 0 && cleanHistory.length > 0
+        filterCategories.length === 0 &&
+        cleanHistory.length > 0 &&
+        messageFilters.profile_thickness_mm == null
           ? inferUserCommittedCategoryFromHistory(
               cleanHistory,
               message,
@@ -3391,7 +3421,7 @@ export async function POST(req: NextRequest) {
         const publicSummary = publicMultiColorCompareSummary(colorCompareGuard);
         if (leakedInstruction || (!hasBothPrices && publicSummary)) {
           // İç talimat sızmışsa ham cevabı temiz özetle değiştir/ekle
-          let cleaned = rawReply
+          const cleaned = rawReply
             .replace(/-?\s*siyah:.*?uydurma\)\.?/gi, '')
             .replace(/Fiyat farkını sayısal hesapla[^\n]*/gi, '')
             .replace(/\(uydurma\)/gi, '')

@@ -251,6 +251,36 @@ const CASES = [
     mustInclude: [/hayır/i, /32/],
     mustNotInclude: [/hepsinin profil kalınlığı 25|hepsinin.*25 mm'dir|hepsi.*25 mm/i],
   },
+  {
+    name: '35 mm ürün sonrası 25 mm liste: eski panoyu pinleme',
+    history: [
+      { role: 'user', content: 'hangi ürünün kalınlığı 35 mmdir' },
+      {
+        role: 'assistant',
+        content:
+          '35 mm profil kalınlığında Ores Poster Swing - Su Depolu Kaldırım Reklam Panosu vardır.',
+      },
+    ],
+    q: '25 mm kalınlığında ürünlerini incelemek istiyorum',
+    mustInclude: [/25 mm/i, /\[\[URUN_KARTLARI\]\]/i],
+    mustNotInclude: [/bulunmamaktadır|yalnızca 35|Poster Swing/i],
+    minProductSources: 20,
+  },
+  {
+    name: 'Her fiyatta olabilir: önceki 25 mm profilini koru',
+    history: [
+      { role: 'user', content: '25 mm kalınlığında ürünlerini incelemek istiyorum' },
+      {
+        role: 'assistant',
+        content:
+          '25 mm profil ürünlerinde fiyat sınırınıza uyan sonuç bulunamadı.',
+      },
+    ],
+    q: 'her fiyatta olabilir',
+    mustInclude: [/25 mm/i, /\[\[URUN_KARTLARI\]\]/i],
+    mustNotInclude: [/bulunmamaktadır|yalnızca 35|Poster Swing/i],
+    minProductSources: 20,
+  },
 ];
 
 const email = `eval-prod-${Date.now()}@wed1ng.shop`;
