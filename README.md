@@ -1,6 +1,6 @@
  RAG Chatbot
 
-Ores mağazası için Türkçe e-ticaret asistanı. Ürün kataloğu ve mağaza politikaları hakkında soruları yanıtlar; cevapları mümkün olduğunca belge ve veritabanı gerçeklerine dayandırır.
+Türkçe e-ticaret asistanı. Ürün kataloğu ve mağaza politikaları hakkında soruları yanıtlar; cevapları mümkün olduğunca belge ve veritabanı gerçeklerine dayandırır.
 
 **Canlı:** [rag-chatbot-seven-beta.vercel.app](https://rag-chatbot-seven-beta.vercel.app)
 
