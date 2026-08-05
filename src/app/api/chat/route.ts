@@ -36,6 +36,8 @@ interface MatchedDocument {
 }
 
 const MAX_CITATION_SOURCES = 3;
+/** Zayıf vektör eşleşmelerinde Kaynaklar şişmesin (sosyal medya → 3× %40 chunk). */
+const MIN_CITATION_SIMILARITY = 0.48;
 
 /** İçindekiler / kapak gibi düşük değerli politika chunk'larını kaynak listesinden çıkar. */
 function isLowValuePolicyChunk(doc: MatchedDocument): boolean {
@@ -49,6 +51,45 @@ function isLowValuePolicyChunk(doc: MatchedDocument): boolean {
     bodyStart.startsWith('# ores') ||
     /^#+\s*içindekiler/m.test(doc.content.toLocaleLowerCase('tr-TR'))
   );
+}
+
+/** Sosyal medya / telefon / e-posta gibi tek gerçek kaynaklı sorular */
+function looksLikeNarrowContactQuestion(message: string): boolean {
+  return /(sosyal\s*medya|instagram|facebook|youtube|twitter|linkedin|whatsapp|telefon(?:unuz|unuzu)?|e-?posta|email|mail\s*adres|iletişim\s*bilgi|çalışma\s*saat|müşteri\s*hizmet)/i.test(
+    message
+  );
+}
+
+/** Soruda geçen iletişim/politika terimleri chunk metninde yoksa kaynak sayma */
+function policyChunkRelevantToMessage(
+  doc: MatchedDocument,
+  message: string
+): boolean {
+  const msg = message.toLocaleLowerCase('tr-TR');
+  const content = doc.content.toLocaleLowerCase('tr-TR');
+  const topicTerms = [
+    'sosyal',
+    'instagram',
+    'facebook',
+    'youtube',
+    'twitter',
+    'linkedin',
+    'whatsapp',
+    'telefon',
+    'e-posta',
+    'email',
+    'iade',
+    'kargo',
+    'teslimat',
+    'garanti',
+    'gizlilik',
+    'ödeme',
+    'fatura',
+    'kvkk',
+  ];
+  const mentioned = topicTerms.filter((term) => msg.includes(term));
+  if (mentioned.length === 0) return true;
+  return mentioned.some((term) => content.includes(term));
 }
 
 /**
@@ -127,9 +168,17 @@ function buildCitationSources(
     return bySimilarity(dedupeDocuments(products)).slice(0, MAX_CITATION_SOURCES);
   }
 
-  const policies = documents.filter(
+  let policies = documents.filter(
     (doc) => doc.metadata?.type === 'policy' && !isLowValuePolicyChunk(doc)
   );
+  // "sosyal medya" sorusunda gizlilik/yasal chunk'ları ele — içerik eşleşmesi
+  const topicalPolicies = policies.filter((doc) =>
+    policyChunkRelevantToMessage(doc, message)
+  );
+  if (topicalPolicies.length > 0) {
+    policies = topicalPolicies;
+  }
+
   const products = documents.filter((doc) => doc.metadata?.type === 'product');
   const pool =
     policies.length > 0
@@ -138,7 +187,22 @@ function buildCitationSources(
         ? bySimilarity(products)
         : bySimilarity(documents.filter((doc) => !isLowValuePolicyChunk(doc)));
 
-  return dedupeDocuments(pool).slice(0, MAX_CITATION_SOURCES);
+  let ranked = dedupeDocuments(pool);
+
+  // Zayıf eşleşmeleri kes (en iyi kaynağı her zaman tut)
+  if (ranked.length > 1 && typeof ranked[0].similarity === 'number') {
+    const top = ranked[0].similarity;
+    ranked = ranked.filter((doc, index) => {
+      if (index === 0) return true;
+      if (typeof doc.similarity !== 'number') return false;
+      if (doc.similarity < MIN_CITATION_SIMILARITY) return false;
+      return doc.similarity >= top - 0.06;
+    });
+  }
+
+  // İletişim / sosyal medya → tek kaynak yeterli
+  const limit = looksLikeNarrowContactQuestion(message) ? 1 : MAX_CITATION_SOURCES;
+  return ranked.slice(0, limit);
 }
 
 /**
