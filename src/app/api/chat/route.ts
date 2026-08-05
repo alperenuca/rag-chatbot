@@ -702,6 +702,56 @@ function collectProfileThicknessesMm(docs: MatchedDocument[]): number[] {
   return [...set].sort((a, b) => a - b);
 }
 
+/** "hangi renkler var" / "renk seçenekleri neler" — tek ürün değil, katalog dökümü */
+function looksLikeColorCatalogQuestion(message: string): boolean {
+  const t = message.toLocaleLowerCase('tr-TR');
+  if (!/renk|renkler|renkte|renginde/i.test(t)) return false;
+  // "bu ürünün rengi ne?" tek ürün sorusudur
+  if (/(bu|şu|o)\s+(ürün|çerçeve|pano|model)|bunun|onun\s+reng/i.test(t)) return false;
+  return /(hangi\s+renk|ne\s+renk|renkler\s+(?:var|mevcut|neler)|renk\s*(?:seçenek|çeşit)|renkleri\s+(?:neler|nedir|var)|kaç\s+renk|renklerde)/i.test(
+    t
+  );
+}
+
+/**
+ * "kırmızı renkte ürün var mı" — belirli bir rengin katalogda olup olmadığı.
+ * Son konuşulan ürüne ait takip sorusu DEĞİL; yeni bir arama.
+ */
+function looksLikeColorAvailabilityQuestion(message: string): boolean {
+  const t = message.toLocaleLowerCase('tr-TR');
+  if (extractColorsFromMessage(t).length === 0) return false;
+  if (/(bu|şu|o)\s+(ürün|çerçeve|pano|model)|bunun|bunu\b/i.test(t)) return false;
+  return /(var\s*mı|var\s*mi|varmı|mevcut\s*mu|bulunuyor\s*mu|bulunur\s*mu|olan\s*var|istiyorum|arıyorum|göster|listele|olsun)/i.test(
+    t
+  );
+}
+
+/**
+ * Katalogdaki renkleri ürün sayısıyla toplar. Tek kayıtta "Beyaz, Gümüş" gibi
+ * çoklu değerler olabildiği için virgülden ayırıyoruz.
+ */
+function collectColorsFromDocs(
+  docs: MatchedDocument[]
+): { label: string; count: number }[] {
+  const counts = new Map<string, { label: string; count: number }>();
+  for (const doc of docs) {
+    if (doc.metadata?.type !== 'product') continue;
+    const raw = doc.metadata?.color;
+    if (typeof raw !== 'string' || !raw.trim()) continue;
+    for (const part of raw.split(/[,/]/)) {
+      const label = part.trim();
+      if (!label) continue;
+      const key = label.toLocaleLowerCase('tr-TR');
+      const existing = counts.get(key);
+      if (existing) existing.count += 1;
+      else counts.set(key, { label, count: 1 });
+    }
+  }
+  return [...counts.values()].sort(
+    (a, b) => b.count - a.count || a.label.localeCompare(b.label, 'tr')
+  );
+}
+
 /** "5311 TL elimde var, bu ürünü alabilir miyim?" — katalog bütçe filtresi değil */
 function looksLikeAffordabilityQuestion(message: string): boolean {
   const t = message.toLocaleLowerCase('tr-TR');
@@ -1286,6 +1336,9 @@ function looksLikeProductFollowUp(message: string): boolean {
   if (looksLikeAcceptAlternateCategory(message)) return false;
   // "kaç mmlik ürünler var" / "hangi ürün 35 mm" → pin değil
   if (looksLikeProfileCatalogQuestion(message)) return false;
+  // "hangi renkler var" / "kırmızı renkte ürün var mı" → yeni arama, pin değil
+  if (looksLikeColorCatalogQuestion(message)) return false;
+  if (looksLikeColorAvailabilityQuestion(message)) return false;
 
   // Katalog/liste aramaları takip sorusu değildir ("indirimli ürünler hangileri").
   // Dikkat: "gösterdiğin ürün" gibi takip ifadelerinde "göster" alt dizisi
@@ -2830,8 +2883,31 @@ export async function POST(req: NextRequest) {
       messageFilters.min_price_exclusive = undefined;
     }
 
-    // Profil katalog: "kaç mm var?" / "hangi ürün 35 mm?" / "her çerçeve 25 mi?"
-    if (looksLikeProfileCatalogQuestion(message) || relaxedProfileMm != null) {
+    // Renk dökümü: "hangi renkler var?" → modelin "genellikle çeşitli renkler"
+    // gibi geçiştirmesi yerine katalogdaki gerçek renkleri say.
+    if (looksLikeColorCatalogQuestion(message)) {
+      const explicitCategory = findMentionedCategories(message, knownCategories)[0] ?? null;
+      const scopeCategory =
+        explicitCategory ??
+        inferUserCommittedCategoryFromHistory(cleanHistory, message, knownCategories);
+      const surveyDocs = await executeSearchProducts(supabase, knownCategories, {
+        ...(scopeCategory ? { category: scopeCategory } : {}),
+        limit: 200,
+      });
+      const colors = collectColorsFromDocs(surveyDocs);
+      const scopeLabel = scopeCategory
+        ? `"${scopeCategory}" kategorisinde`
+        : 'kataloğumuzda';
+
+      documents = [];
+      hasProductCards = false;
+      rawReply =
+        colors.length > 0
+          ? `${scopeLabel} mevcut renkler: ${colors
+              .map((color) => `${color.label} (${color.count} ürün)`)
+              .join(', ')}.\n\nHangi renkteki modelleri göstermemi istersiniz?`
+          : `${scopeLabel} ürünlerde renk bilgisi bulunmuyor; dilerseniz ölçü veya bütçeye göre liste çıkarabilirim.`;
+    } else if (looksLikeProfileCatalogQuestion(message) || relaxedProfileMm != null) {
       const claimed = extractClaimedProfileMm(message) ?? relaxedProfileMm;
       const frameScoped =
         looksLikeUniversalProfileQuestion(message) || /çerçeve/i.test(message);

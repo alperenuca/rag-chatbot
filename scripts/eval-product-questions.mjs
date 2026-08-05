@@ -281,6 +281,56 @@ const CASES = [
     mustNotInclude: [/bulunmamaktadır|yalnızca 35|Poster Swing/i],
     minProductSources: 20,
   },
+  {
+    name: 'Renk takip: kırmızı var mı (katalogda 3 adet)',
+    history: [
+      { role: 'user', content: 'afiş çerçevesi' },
+      {
+        role: 'assistant',
+        content:
+          'Afiş çerçevesi kategorisinde toplam 27 ürün bulunmaktadır. Listedeki ürünlerden ilgilendiğiniz bir model var mı?',
+      },
+    ],
+    q: 'kırmızı renkte bir ürünün var mı',
+    mustInclude: [/kırmızı/i, /\[\[URUN_KARTLARI\]\]/i],
+    mustNotInclude: [/bulunmamaktadır|bulunmuyor|kırmızı.{0,30}yok/i],
+    minProductSources: 3,
+  },
+  {
+    name: 'Renk takip: pano konuşulduktan sonra kırmızı (pin yok)',
+    history: [
+      { role: 'user', content: 'kaldırım panosu' },
+      {
+        role: 'assistant',
+        content:
+          'Kaldırım Panosu kategorisinde 1 ürün var: Ores Poster Swing - Su Depolu Kaldırım Reklam Panosu, A1, 60x84 cm — 5310 TL.\n\n[[URUN_KARTLARI]]',
+      },
+      { role: 'user', content: 'afiş çerçevesi' },
+      {
+        role: 'assistant',
+        content:
+          'Afiş çerçevesi kategorisinde toplam 27 ürün bulunmaktadır.\n\n[[URUN_KARTLARI]]',
+      },
+    ],
+    q: 'kırmızı renkte bir ürünün var mı',
+    mustInclude: [/kırmızı/i, /\[\[URUN_KARTLARI\]\]/i],
+    mustNotInclude: [/bulunmamaktadır|bulunmuyor|Poster Swing/i],
+    minProductSources: 3,
+    maxProductSources: 3,
+  },
+  {
+    name: 'Hangi renkler var: katalog renk dökümü',
+    history: [
+      { role: 'user', content: 'afiş çerçevesi' },
+      {
+        role: 'assistant',
+        content: 'Afiş çerçevesi kategorisinde toplam 27 ürün bulunmaktadır.',
+      },
+    ],
+    q: 'hangi renkler var',
+    mustInclude: [/gümüş/i, /siyah/i, /kırmızı/i, /kahverengi/i],
+    mustNotInclude: [/genellikle|çeşitli renk|ürünleri incelemeniz/i],
+  },
 ];
 
 const email = `eval-prod-${Date.now()}@wed1ng.shop`;
