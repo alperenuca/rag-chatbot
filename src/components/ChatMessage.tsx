@@ -132,15 +132,24 @@ export default function ChatMessage({
             {!showCarousel && !beforeText && (
               <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-white text-neutral-800 rounded-bl-md border border-neutral-200 shadow-sm shadow-neutral-900/5">
                 {isStreaming && !message.content ? (
-                  <span className="text-neutral-400">Yazıyor…</span>
+                  <div
+                    className="flex items-center gap-1.5 py-0.5"
+                    aria-label="Yanıt hazırlanıyor"
+                  >
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-red-400" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-red-400 [animation-delay:0.2s]" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-red-400 [animation-delay:0.4s]" />
+                  </div>
                 ) : (
-                  <MarkdownContent content={displayContent} />
-                )}
-                {isStreaming && (
-                  <span
-                    className="ml-0.5 inline-block h-4 w-0.5 translate-y-0.5 animate-pulse bg-red-500"
-                    aria-hidden
-                  />
+                  <>
+                    <MarkdownContent content={displayContent} />
+                    {isStreaming && (
+                      <span
+                        className="ml-0.5 inline-block h-4 w-0.5 translate-y-0.5 animate-pulse bg-red-500"
+                        aria-hidden
+                      />
+                    )}
+                  </>
                 )}
               </div>
             )}

@@ -1,6 +1,6 @@
 /**
  * Chat SSE: UI stream:true ister; eval/JSON varsayılan kalır.
- * event: meta | delta | done | error
+ * event: status | meta | delta | done | error
  */
 
 export type ChatStreamPayload = {
@@ -10,6 +10,13 @@ export type ChatStreamPayload = {
   conversationId: string | null;
   conversationTitle: string | null;
 };
+
+const SSE_HEADERS = {
+  'Content-Type': 'text/event-stream; charset=utf-8',
+  'Cache-Control': 'no-cache, no-transform',
+  Connection: 'keep-alive',
+  'X-Accel-Buffering': 'no',
+} as const;
 
 export function encodeSseEvent(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -33,11 +40,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Tam payload hazır olduktan sonra SSE typewriter yanıtı. */
-export function streamChatPayloadAsSSE(payload: ChatStreamPayload): Response {
+/**
+ * SSE’yi hemen açar (status: thinking), JSON chat işi bitince typewriter + done.
+ * Böylece uzun LLM beklerken bağlantı ve UI balonu canlı kalır.
+ */
+export function streamFromChatJsonWork(
+  work: () => Promise<Response>
+): Response {
   const encoder = new TextEncoder();
-  const chunks = chunkReplyForStream(payload.reply);
-  const delayMs = chunks.length <= 12 ? 18 : chunks.length <= 28 ? 12 : 8;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -46,23 +56,51 @@ export function streamChatPayloadAsSSE(payload: ChatStreamPayload): Response {
       };
 
       try {
+        send('status', { phase: 'thinking' });
+
+        const res = await work();
+        let data: Record<string, unknown> = {};
+        try {
+          data = (await res.json()) as Record<string, unknown>;
+        } catch {
+          send('error', { error: 'Yanıt okunamadı' });
+          return;
+        }
+
+        if (!res.ok) {
+          send('error', {
+            error:
+              typeof data.error === 'string' ? data.error : 'Bir hata oluştu',
+          });
+          return;
+        }
+
+        const payload: ChatStreamPayload = {
+          reply: typeof data.reply === 'string' ? data.reply : '',
+          sources: Array.isArray(data.sources) ? data.sources : [],
+          citations: Array.isArray(data.citations) ? data.citations : [],
+          conversationId:
+            typeof data.conversationId === 'string' ? data.conversationId : null,
+          conversationTitle:
+            typeof data.conversationTitle === 'string'
+              ? data.conversationTitle
+              : null,
+        };
+
         send('meta', {
           conversationId: payload.conversationId,
           conversationTitle: payload.conversationTitle,
         });
 
+        const chunks = chunkReplyForStream(payload.reply);
+        const delayMs =
+          chunks.length <= 12 ? 18 : chunks.length <= 28 ? 12 : 8;
         for (const chunk of chunks) {
           send('delta', { text: chunk });
           await sleep(delayMs);
         }
 
-        send('done', {
-          reply: payload.reply,
-          sources: payload.sources,
-          citations: payload.citations,
-          conversationId: payload.conversationId,
-          conversationTitle: payload.conversationTitle,
-        });
+        send('done', payload);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Stream hatası';
         send('error', { error: message });
@@ -72,17 +110,24 @@ export function streamChatPayloadAsSSE(payload: ChatStreamPayload): Response {
     },
   });
 
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    },
-  });
+  return new Response(stream, { headers: SSE_HEADERS });
+}
+
+/** @deprecated Tercihen streamFromChatJsonWork — hemen status gönderir */
+export function streamChatPayloadAsSSE(payload: ChatStreamPayload): Response {
+  return streamFromChatJsonWork(async () =>
+    Response.json({
+      reply: payload.reply,
+      sources: payload.sources,
+      citations: payload.citations,
+      conversationId: payload.conversationId,
+      conversationTitle: payload.conversationTitle,
+    })
+  );
 }
 
 export type ChatSseHandlers = {
+  onStatus?: (data: { phase?: string }) => void;
   onMeta?: (data: {
     conversationId?: string | null;
     conversationTitle?: string | null;
@@ -122,8 +167,15 @@ export async function consumeChatSse(
       return;
     }
 
-    if (event === 'meta' && data && typeof data === 'object') {
-      handlers.onMeta?.(data as { conversationId?: string | null; conversationTitle?: string | null });
+    if (event === 'status' && data && typeof data === 'object') {
+      handlers.onStatus?.(data as { phase?: string });
+    } else if (event === 'meta' && data && typeof data === 'object') {
+      handlers.onMeta?.(
+        data as {
+          conversationId?: string | null;
+          conversationTitle?: string | null;
+        }
+      );
     } else if (
       event === 'delta' &&
       data &&

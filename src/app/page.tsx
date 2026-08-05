@@ -193,6 +193,8 @@ export default function Home() {
       // Karşılama mesajını OpenAI geçmişine gönderme; aksi halde model onu
       // gerçek bir asistan turu sanıp bağlamı bozabiliyor.
       const historyForRequest = messages
+        .filter((msg) => !msg.streaming)
+        .filter((msg) => msg.content.trim().length > 0)
         .filter((msg) => !msg.content.startsWith('❌'))
         .filter((msg) => msg.content !== WELCOME_MESSAGE.content)
         .map((msg) => ({ role: msg.role, content: msg.content }));
@@ -237,9 +239,10 @@ export default function Home() {
         });
 
         const contentType = response.headers.get('content-type') ?? '';
+        const isSse = contentType.includes('text/event-stream');
 
-        // Hata veya eski JSON yolu
-        if (!response.ok || contentType.includes('application/json')) {
+        // Hata veya JSON (eval / eski API) — SSE değilse
+        if (!response.ok || !isSse) {
           const data = await response.json().catch(() => ({}));
           if (!response.ok) {
             throw new Error(
@@ -419,7 +422,7 @@ export default function Home() {
                 />
               ))}
 
-            {/* Stream balonu "Yazıyor…" gösterir; ekstra bounce yalnızca o yokken */}
+            {/* Stream balonu içinde noktalar var; yalnızca o yoksa yedek bounce */}
             {loading && !messages.some((m) => m.streaming) && (
               <div className="flex items-end gap-2">
                 <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-500 border border-neutral-200">

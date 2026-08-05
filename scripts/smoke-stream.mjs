@@ -84,13 +84,14 @@ if (!res.ok || !ct.includes('text/event-stream')) {
 }
 
 const text = await res.text();
+const hasStatus = /event:\s*status/.test(text);
 const hasMeta = /event:\s*meta/.test(text);
 const hasDelta = /event:\s*delta/.test(text);
 const hasDone = /event:\s*done/.test(text);
 const deltaCount = (text.match(/event:\s*delta/g) || []).length;
-console.log({ hasMeta, hasDelta, hasDone, deltaCount });
+console.log({ hasStatus, hasMeta, hasDelta, hasDone, deltaCount });
 console.log('--- sample ---\n', text.slice(0, 500));
-if (!hasMeta || !hasDelta || !hasDone) process.exit(1);
+if (!hasStatus || !hasMeta || !hasDelta || !hasDone) process.exit(1);
 console.log('✅ stream smoke PASS');
 
 if (session.user?.id) {

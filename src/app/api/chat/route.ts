@@ -3,7 +3,7 @@ import OpenAI from 'openai';
 import type { ChatCompletionMessageParam, ChatCompletionTool } from 'openai/resources/chat/completions';
 import dotenv from 'dotenv';
 import { createClient } from '@/lib/supabase/server';
-import { streamChatPayloadAsSSE } from '@/lib/chat-stream';
+import { streamFromChatJsonWork } from '@/lib/chat-stream';
 
 // Yerelde .env.local'ı yükle. Vercel'de ortam değişkenleri zaten
 // process.env üzerinden gelir; production'da dosya aramaya gerek yok.
@@ -3356,11 +3356,22 @@ function buildSystemPrompt(params: BuildSystemPromptParams): string {
 }
 
 export async function POST(req: NextRequest) {
+  const body = (await req.json()) as Record<string, unknown>;
+  // UI stream:true → SSE hemen açılır; iş bitince typewriter.
+  // Eval / eski istemci stream göndermez → JSON.
+  if (body?.stream === true) {
+    return streamFromChatJsonWork(() =>
+      processChatRequest({ ...body, stream: false })
+    );
+  }
+  return processChatRequest(body);
+}
+
+async function processChatRequest(
+  body: Record<string, unknown>
+): Promise<NextResponse> {
   try {
-    const body = await req.json();
     const { message, conversationId, history } = body;
-    // UI stream:true; eval / eski istemciler JSON alır
-    const wantStream = body?.stream === true;
 
     if (!message || typeof message !== 'string') {
       return NextResponse.json(
@@ -4691,20 +4702,14 @@ export async function POST(req: NextRequest) {
       console.error('Sohbet oturumu oluşturulamadığı için mesajlar kaydedilmedi.');
     }
 
-    const responsePayload = {
+    return NextResponse.json({
       reply,
       // Geriye uyumluluk: carousel `sources` içindeki product metadata'yı okur
       sources: persistedSources.length > 0 ? persistedSources : citationSources,
       citations: citationSources,
       conversationId: activeConversationId,
       conversationTitle: conversationResult?.title ?? null,
-    };
-
-    if (wantStream) {
-      return streamChatPayloadAsSSE(responsePayload);
-    }
-
-    return NextResponse.json(responsePayload);
+    });
   } catch (err: unknown) {
     console.error('Chat API Error:', err);
     const errorMessage = err instanceof Error ? err.message : 'Sunucu hatası';
