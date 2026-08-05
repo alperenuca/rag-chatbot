@@ -172,6 +172,33 @@ const CASES = [
     mustNotInclude: [/18\s*TL|elinizdeki 18|fark 447/i],
   },
   {
+    name: '100 adet sipariş → kilitli ürün stok (gönye katalog tuzağı)',
+    history: [
+      {
+        role: 'user',
+        content:
+          'A1 Alüminyum Açılır Kapanır Çerçeve, Gönye Köşe, 60x84 cm - 25mm',
+      },
+      {
+        role: 'assistant',
+        content:
+          'A1 Alüminyum Açılır Kapanır Çerçeve, Gönye Köşe, 60x84 cm - 25mm ürününde UV korumalı PET folyo vardır. Stok ve fiyat için yardımcı olabilirim.',
+      },
+      { role: 'user', content: 'peki bu üründe uv koruma var mı' },
+      {
+        role: 'assistant',
+        content:
+          'Evet, A1 Alüminyum Açılır Kapanır Çerçeve, Gönye Köşe, 60x84 cm - 25mm UV korumalı PET folyo içerir.',
+      },
+    ],
+    q: 'anladım 100 adet sipariş vermek istiyorum',
+    mustInclude: [/stok|adet/i, /100/],
+    mustNotInclude: [
+      /gönye köşeli.*rondo|rondo köşeli|Afiş Çerçevesi['’]nde|aşağıda.*gönye/i,
+      /\[\[URUN_KARTLARI\]\]/i,
+    ],
+  },
+  {
     name: '18 adet kargo → kilitli ürün 465 TL (420 sanma)',
     history: [
       {

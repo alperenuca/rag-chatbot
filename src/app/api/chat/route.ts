@@ -1757,6 +1757,15 @@ function looksLikeProductFollowUp(message: string): boolean {
   ];
   if (catalogListPatterns.some((pattern) => pattern.test(normalized))) return false;
 
+  // "anladım 100 adet sipariş vermek istiyorum" → son ürün stok/sipariş;
+  // "50 adet kırmızı A4 almak istiyorum" (yeni kriter) → pin değil.
+  if (
+    looksLikeQuantityPurchaseQuestion(message) &&
+    !hasNewSearchCriterion(message)
+  ) {
+    return true;
+  }
+
   const referential = [
     'bu ürün', 'bu ürüne', 'bu ürünün', 'bu ürünü', 'bu üründen',
     'bu gösterdiğin', 'gösterdiğin ürün', 'gösterdiğin',
@@ -1913,13 +1922,37 @@ function extractCornerTypeFromMessage(message: string): CornerType | null {
 }
 
 /**
+ * "Gönye köşeli istiyorum" / "rondo olsun" → köşe kriteri.
+ * "Bilgi al" ile gelen uzun ürün adındaki "Gönye Köşe" → kriter sayma
+ * (aksi halde sonraki "100 adet sipariş" gönye kataloğuna düşer).
+ */
+function looksLikeCornerBrowseIntent(message: string): boolean {
+  const corner = extractCornerTypeFromMessage(message);
+  if (!corner) return false;
+  const t = message.toLocaleLowerCase('tr-TR');
+  // Ürün başlığı yapıştırma: ölçü + marka/model kalıbı
+  if (
+    message.length > 45 &&
+    /\d+\s*[x×]\s*\d+\s*cm/i.test(t) &&
+    /(açılır\s*kapanır|alüminyum|çerçeve|pano)/i.test(t)
+  ) {
+    return false;
+  }
+  return /(köşe|köşeli|istiyorum|arıyorum|olsun|ihtiyac|olanlar|var\s*m[ıi]|göster|liste)/i.test(
+    t
+  );
+}
+
+/**
  * "Gönye köşeli ürüne ihtiyacım var" dedikten sonra "afiş çerçevesi" yazan
  * kullanıcı köşe tipini tekrar yazmıyor; kriteri son turlardan taşı.
  */
 function inferCornerTypeFromHistory(history: HistoryTurn[]): CornerType | null {
   const userTurns = history.filter((turn) => turn.role === 'user').slice(-4);
   for (let i = userTurns.length - 1; i >= 0; i -= 1) {
-    const corner = extractCornerTypeFromMessage(userTurns[i].content);
+    const content = userTurns[i].content;
+    if (!looksLikeCornerBrowseIntent(content)) continue;
+    const corner = extractCornerTypeFromMessage(content);
     if (corner) return corner;
   }
   return null;
@@ -3624,7 +3657,13 @@ export async function POST(req: NextRequest) {
     const messageFilters = extractSearchFiltersFromMessage(message);
     // "Gönye köşeli ürün istiyorum" → "afiş çerçevesi": köşe kriteri önceki
     // turda kaldığı için bu mesajda yok; taşımazsak rondo ürünler de listelenir.
-    if (messageFilters.corner_type == null) {
+    // Sipariş/adet/takip detayında taşıma: "Bilgi al" başlığındaki Gönye,
+    // "100 adet sipariş"i gönye kataloğuna çevirmesin.
+    const skipCornerFromHistory =
+      looksLikeQuantityPurchaseQuestion(message) ||
+      looksLikeAffordabilityQuestion(message) ||
+      looksLikeProductFollowUp(message);
+    if (messageFilters.corner_type == null && !skipCornerFromHistory) {
       const cornerFromHistory = inferCornerTypeFromHistory(cleanHistory);
       if (cornerFromHistory) {
         messageFilters.corner_type = cornerFromHistory;
