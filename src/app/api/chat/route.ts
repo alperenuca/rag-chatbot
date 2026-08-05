@@ -2138,6 +2138,80 @@ function urgentSupportHint(message: string): string {
   return lines.join('\n');
 }
 
+/**
+ * Ürün dokümanını modele verilecek metne çevirir.
+ *
+ * `compact` modda `content` HİÇ kullanılmaz: ihtiyaç duyulan tüm alanlar
+ * (ölçü, profil, renk, ağırlık, fiyat, stok) metadata'da mevcut. Böylece
+ * ürün başına ~2.400 karakterlik pazarlama açıklaması ve content ile
+ * çakışan tekrar satırları bağlama hiç girmez — liste/filtre/sıralama
+ * yanıtlarında bu bilgi zaten kartlarda gösteriliyor.
+ *
+ * `detail` modda (takip detayı, kartsız tek ürün cevabı) uzun açıklama ve
+ * satın alma linki eklenir; Kural 3'ün istediği detay formatı korunur.
+ */
+function formatProductForPrompt(
+  doc: MatchedDocument,
+  mode: 'compact' | 'detail'
+): string {
+  const meta = doc.metadata ?? {};
+  const str = (value: unknown): string | null =>
+    typeof value === 'string' && value.trim() ? value.trim() : null;
+  const num = (value: unknown): number | null => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() && !Number.isNaN(Number(value))) {
+      return Number(value);
+    }
+    return null;
+  };
+
+  const title = str(meta.title);
+  // Metadata bozuk/eksikse eski davranışa düş: ham content her zaman doğrudur.
+  if (!title) return doc.content;
+
+  const profileMm = num(meta.profile_thickness_mm);
+  const listPrice = num(meta.list_price);
+  const salePrice = num(meta.price);
+  const hasDiscount = meta.has_discount === true;
+  const stock = num(meta.stock);
+  // Köşe tipi henüz metadata'da tutulmuyor; content'ten oku.
+  const cornerType =
+    str(meta.corner_type) ?? doc.content.match(/Köşe Tipi:\s*([^|\n]+)/i)?.[1]?.trim() ?? null;
+
+  const priceText =
+    salePrice != null
+      ? hasDiscount && listPrice != null
+        ? `Liste ${listPrice} TL / İndirimli ${salePrice} TL (İndirimde)`
+        : `Fiyat ${salePrice} TL (İndirim yok)`
+      : null;
+
+  const fields = [
+    `Ürün: ${title}`,
+    str(meta.category) ? `Kategori: ${meta.category}` : null,
+    str(meta.dimension) ? `Ölçü: ${meta.dimension}` : null,
+    profileMm != null ? `Profil: ${profileMm} mm` : null,
+    cornerType ? `Köşe: ${cornerType}` : null,
+    str(meta.material) ? `Malzeme: ${meta.material}` : null,
+    str(meta.color) ? `Renk: ${meta.color}` : null,
+    num(meta.weight_kg) != null ? `Ağırlık: ${num(meta.weight_kg)} kg` : null,
+    priceText,
+    stock != null ? `Stok: ${stock}` : null,
+  ].filter((field): field is string => Boolean(field));
+
+  const compactLine = fields.join(' | ');
+  if (mode === 'compact') return compactLine;
+
+  const description = doc.content.match(/Açıklama:\s*([\s\S]+)$/)?.[1]?.trim() ?? null;
+  const url = str(meta.url);
+  return [
+    compactLine,
+    description ? `Açıklama: ${description}` : null,
+    url ? `Ürün Satın Alma Linki: ${url}` : null,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join('\n');
+}
+
 function withPolicyHints(message: string, contextText: string): string {
   // En kritik / çakışmaya açık ipuçları önce (model FAQ parçasına kaymasın)
   const hints = [
@@ -2805,50 +2879,24 @@ export async function POST(req: NextRequest) {
           } stok adedi 0. Kısa özet cümlende bunu AÇIKÇA belirt ("şu an stokta yok"); ürünü stoktaymış gibi "hemen satın alabilirsiniz" DEME. Kartları yine göster; stok/alternatif için iletişime veya diğer modellere yönlendir.\n\n`
         : '';
 
+      // Uzun açıklama + satın alma linki yalnızca metin cevabının bunlara
+      // gerçekten ihtiyaç duyduğu iki durumda gönderilir: kilitlenmiş takip
+      // ürünü (Kural 3 detay sırası) ve kartsız tek/çift ürün cevabı. Liste
+      // ve filtre yanıtlarında detaylar kartlarda göründüğü için bağlama
+      // sadece kompakt alan satırı girer.
+      const productMode: 'compact' | 'detail' =
+        pinnedFollowUpProduct || (!hasProductCards && productDocuments.length <= 2)
+          ? 'detail'
+          : 'compact';
+
       const hasRelevantContext = docs.length > 0;
       const contextBody = hasRelevantContext
         ? docs
-            .map((doc) => {
-              // Metadata alanlarını (ağırlık, liste/indirimli fiyat, URL) modelin
-              // okuduğu bağlama açıkça ekle. content'te olsa bile burada tekrar
-              // etmek zarar vermez; content eski formatta kaldıysa kritik koruma
-              // sağlar.
-              const url = doc.metadata?.url;
-              const weightKg = doc.metadata?.weight_kg;
-              const listPrice = doc.metadata?.list_price;
-              const salePrice = doc.metadata?.price;
-              const hasDiscount = doc.metadata?.has_discount === true;
-              const profileRaw = doc.metadata?.profile_thickness_mm;
-              const profileMm =
-                typeof profileRaw === 'number'
-                  ? profileRaw
-                  : typeof profileRaw === 'string' && profileRaw.trim() && !Number.isNaN(Number(profileRaw))
-                    ? Number(profileRaw)
-                    : null;
-              const dimension =
-                typeof doc.metadata?.dimension === 'string' ? doc.metadata.dimension : null;
-              const material =
-                typeof doc.metadata?.material === 'string' ? doc.metadata.material : null;
-              const color =
-                typeof doc.metadata?.color === 'string' ? doc.metadata.color : null;
-              const extraLines = [
-                dimension ? `Boyut/Ölçü: ${dimension}` : null,
-                profileMm != null ? `Profil Kalınlığı: ${profileMm} mm` : null,
-                material ? `Malzeme: ${material}` : null,
-                color ? `Renk: ${color}` : null,
-                typeof weightKg === 'number' ? `Ağırlık: ${weightKg} kg` : null,
-                typeof listPrice === 'number' ? `Liste Fiyatı: ${listPrice} TL` : null,
-                typeof salePrice === 'number'
-                  ? hasDiscount
-                    ? `İndirimli / Satış Fiyatı: ${salePrice} TL (İndirimde)`
-                    : `Satış Fiyatı: ${salePrice} TL (İndirim yok)`
-                  : null,
-                url ? `Ürün Satın Alma Linki: ${url}` : null,
-              ]
-                .filter((line): line is string => Boolean(line))
-                .join('\n');
-              return extraLines ? `${doc.content}\n${extraLines}` : doc.content;
-            })
+            .map((doc) =>
+              doc.metadata?.type === 'product'
+                ? formatProductForPrompt(doc, productMode)
+                : doc.content
+            )
             .join('\n\n---\n\n')
         : toolActive
           ? 'ARAMA SONUCU: search_products aracı, belirtilen kritere (kategori/fiyat/stok) uyan hiçbir ürün bulamadı.'
