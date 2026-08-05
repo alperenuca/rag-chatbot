@@ -472,6 +472,21 @@ function isLikelyDirectCategoryBrowse(message: string, knownCategories: string[]
   if (looksLikeRankingOrSingleItemQuestion(message)) return [];
   if (wantsAllCatalogProducts(message)) return [];
 
+  // Fiyat aralığı / ölçü / renk gibi sert filtre varsa kategori "tümünü listele"
+  // yoluna düşme — filter branch uygulasın.
+  const filters = extractSearchFiltersFromMessage(message);
+  if (
+    filters.max_price != null ||
+    filters.min_price != null ||
+    filters.dimension ||
+    filters.color ||
+    (filters.colors && filters.colors.length > 0) ||
+    filters.profile_thickness_mm != null ||
+    filters.corner_type != null
+  ) {
+    return [];
+  }
+
   const wordCount = message.trim().split(/\s+/).filter(Boolean).length;
   if (wordCount === 0) return [];
 
@@ -935,6 +950,20 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     !/(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:altı|altında|kadar)/i.test(text) &&
     !/(en fazla|maksimum|max\.?)\s*\d+/i.test(text);
 
+  // "300 TL ile 700 TL arasında" / "300-700 TL arası"
+  const rangeMatch = text.match(
+    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:ile|-|–|—)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:arasında|aras[ıi]|aral[ıi][gğ][ıi]nda)/i
+  );
+  if (!affordabilityNotBudget && rangeMatch?.[1] && rangeMatch?.[2]) {
+    const a = Number(rangeMatch[1].replace(',', '.'));
+    const b = Number(rangeMatch[2].replace(',', '.'));
+    if (Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0) {
+      filters.min_price = Math.min(a, b);
+      filters.max_price = Math.max(a, b);
+      filters.min_price_exclusive = false;
+    }
+  }
+
   // "1000 TL altı", "bende 1000 lira var", "1000 liram var"
   const maxPatterns = [
     /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:altı|altında|kadar)/i,
@@ -944,7 +973,7 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     /(?:bende|elimde)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira(?:m|mız|nız)?|try)?\s*var/i,
   ];
 
-  if (!affordabilityNotBudget) {
+  if (!affordabilityNotBudget && filters.max_price == null) {
     for (const pattern of maxPatterns) {
       const match = text.match(pattern);
       if (match?.[1]) {
@@ -958,23 +987,25 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
   }
 
   // "1000 TL üzeri/üstünde" → exclusive; "en az 1000" → inclusive
-  const exclusiveMin = text.match(
-    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:üzeri|üstünde|üstü|ve üzeri)/i
-  );
-  if (exclusiveMin?.[1]) {
-    const value = Number(exclusiveMin[1].replace(',', '.'));
-    if (Number.isFinite(value) && value > 0) {
-      filters.min_price = value;
-      filters.min_price_exclusive = true;
-    }
-  } else {
-    const inclusiveMin = text.match(
-      /(?:en az|minimum|min\.?)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?/i
+  if (filters.min_price == null) {
+    const exclusiveMin = text.match(
+      /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:üzeri|üstünde|üstü|ve üzeri)/i
     );
-    if (inclusiveMin?.[1]) {
-      const value = Number(inclusiveMin[1].replace(',', '.'));
+    if (exclusiveMin?.[1]) {
+      const value = Number(exclusiveMin[1].replace(',', '.'));
       if (Number.isFinite(value) && value > 0) {
         filters.min_price = value;
+        filters.min_price_exclusive = true;
+      }
+    } else {
+      const inclusiveMin = text.match(
+        /(?:en az|minimum|min\.?)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?/i
+      );
+      if (inclusiveMin?.[1]) {
+        const value = Number(inclusiveMin[1].replace(',', '.'));
+        if (Number.isFinite(value) && value > 0) {
+          filters.min_price = value;
+        }
       }
     }
   }
@@ -998,7 +1029,9 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     }
   } else if (
     !infoBrowseOnly &&
-    (/(stokta olan|stoktakiler|stokta var|sadece stok|stokta olanlar)/i.test(text) ||
+    (/(stokta olan|stoktakiler|stokta var|stokta bulunan|stokta bulunanlar|sadece stok|stokta olanlar|şu an stokta)/i.test(
+      text
+    ) ||
       purchaseIntent ||
       // Bütçe sorusu genelde "ne alabilirim" anlamına gelir → stoksuz gösterme
       filters.max_price != null)
@@ -1211,6 +1244,7 @@ interface DeterministicListingOptions {
   category?: string | null;
   categories?: string[];
   maxPrice?: number;
+  minPrice?: number;
   color?: string;
   colors?: string[];
   dimension?: string;
@@ -1358,12 +1392,18 @@ function buildDeterministicListingReply(opts: DeterministicListingOptions): {
     summary = `Evet — ${opts.profileMm} mm profil kalınlığında ${count} ürün var. Tümünü aşağıdaki kartlarda inceleyebilirsiniz.`;
   } else if (opts.color) {
     summary = `Evet, ${opts.color} renkte ${count} ürünümüz aşağıdadır.`;
+  } else if (opts.minPrice != null && opts.maxPrice != null) {
+    summary = `Evet, ${opts.minPrice}–${opts.maxPrice} TL arasında${
+      opts.dimension ? ` ${opts.dimension} ölçüsünde` : ''
+    } ${count} ürün aşağıdadır.`;
   } else if (opts.dimension && opts.maxPrice != null) {
     summary = `Evet, ${opts.dimension} ölçüsünde ${opts.maxPrice} TL altı/eşit ${count} ürün aşağıdadır.`;
   } else if (opts.dimension) {
     summary = `Evet, ${opts.dimension} ölçüsünde ${count} ürünümüz aşağıdadır.`;
   } else if (opts.maxPrice != null) {
     summary = `Evet, ${opts.maxPrice} TL altı/eşit ${count} ürün aşağıdadır.`;
+  } else if (opts.minPrice != null) {
+    summary = `Evet, ${opts.minPrice} TL ve üzeri ${count} ürün aşağıdadır.`;
   } else if (opts.wantsSingle || opts.kind === 'rank') {
     const title =
       typeof products[0].metadata?.title === 'string'
@@ -4086,12 +4126,27 @@ export async function POST(req: NextRequest) {
         seenFilter.add(key);
         return true;
       });
-      // Bütçe üstü ürün sızmasın (DB filtresi kaçsa bile)
+      // Fiyat aralığı / stok sızmasın (DB filtresi kaçsa bile)
       if (messageFilters.max_price != null) {
         const cap = messageFilters.max_price;
         filterDocs = filterDocs.filter((doc) => {
           const price = doc.metadata?.price;
           return typeof price === 'number' && price <= cap;
+        });
+      }
+      if (messageFilters.min_price != null) {
+        const floor = messageFilters.min_price;
+        const exclusive = messageFilters.min_price_exclusive === true;
+        filterDocs = filterDocs.filter((doc) => {
+          const price = doc.metadata?.price;
+          if (typeof price !== 'number') return false;
+          return exclusive ? price > floor : price >= floor;
+        });
+      }
+      if (messageFilters.in_stock_only) {
+        filterDocs = filterDocs.filter((doc) => {
+          const stock = doc.metadata?.stock;
+          return typeof stock === 'number' && stock > 0;
         });
       }
 
@@ -4138,6 +4193,7 @@ export async function POST(req: NextRequest) {
           kind: 'filter',
           category: filterCategories[0] ?? null,
           maxPrice: messageFilters.max_price,
+          minPrice: messageFilters.min_price,
           color: messageFilters.color,
           colors: messageFilters.colors,
           dimension: messageFilters.dimension,

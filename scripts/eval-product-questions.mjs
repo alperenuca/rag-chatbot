@@ -123,6 +123,13 @@ const CASES = [
     mustNotInclude: [/1000\s*TL.*Siyah B2|1565/i],
   },
   {
+    name: '300-700 TL arası stokta çerçeve (kategori browse tuzağı)',
+    q: 'afiş çerçevesi kategorisinde 300 TL ile 700 TL arasında olan ve şu an stokta bulunan ürünleri listeleyebilir misin?',
+    mustInclude: [/300|700|arasında|\[\[URUN_KARTLARI\]\]/i],
+    mustNotInclude: [/1100|1\.100|toplam 27|Stokta yok/i],
+    productTitlesMustNotInclude: [/Poster Swing/i],
+  },
+  {
     name: 'Çift istek mouse pad + en ucuz 3 çerçeve (kart zorunlu)',
     q: 'Sizde mouse pad veya iPhone kılıfı var mı? Yoksa en ucuz 3 çerçeveyi göster.',
     mustInclude: [/yok|bulunmamaktadır|bulunmuyor/i, /\[\[URUN_KARTLARI\]\]/i],
