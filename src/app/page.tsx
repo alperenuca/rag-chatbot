@@ -7,6 +7,8 @@ import AuthScreen from '@/components/AuthScreen';
 import UserMenu from '@/components/UserMenu';
 import ConversationSidebar, { ConversationSummary } from '@/components/ConversationSidebar';
 import { useAuth } from '@/context/AuthContext';
+import { consumeChatSse } from '@/lib/chat-stream';
+import type { DocumentSource } from '@/components/SourcesAccordion';
 
 const WELCOME_MESSAGE: ChatMessageData = {
   role: 'assistant',
@@ -196,11 +198,31 @@ export default function Home() {
         .map((msg) => ({ role: msg.role, content: msg.content }));
 
       setInput('');
+      const assistantTs = Date.now();
       setMessages((prev) => [
         ...prev,
         { role: 'user', content: userMessage, timestamp: Date.now() },
+        {
+          role: 'assistant',
+          content: '',
+          streaming: true,
+          timestamp: assistantTs,
+        },
       ]);
       setLoading(true);
+
+      const patchLastAssistant = (patch: Partial<ChatMessageData>) => {
+        setMessages((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            if (next[i].role === 'assistant') {
+              next[i] = { ...next[i], ...patch };
+              break;
+            }
+          }
+          return next;
+        });
+      };
 
       try {
         const response = await fetch('/api/chat', {
@@ -210,40 +232,99 @@ export default function Home() {
             message: userMessage,
             history: historyForRequest,
             conversationId,
+            stream: true,
           }),
         });
 
-        const data = await response.json();
+        const contentType = response.headers.get('content-type') ?? '';
 
-        if (!response.ok) {
-          throw new Error(data.error || 'Bir hata oluştu');
+        // Hata veya eski JSON yolu
+        if (!response.ok || contentType.includes('application/json')) {
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(
+              typeof data.error === 'string' ? data.error : 'Bir hata oluştu'
+            );
+          }
+          if (data.conversationId) {
+            setConversationId(data.conversationId);
+            upsertConversationSummary(
+              data.conversationId,
+              data.conversationTitle ?? null
+            );
+          }
+          patchLastAssistant({
+            content: typeof data.reply === 'string' ? data.reply : '',
+            sources: data.sources as DocumentSource[] | undefined,
+            citations: data.citations as DocumentSource[] | undefined,
+            streaming: false,
+          });
+          return;
         }
 
-        if (data.conversationId) {
-          setConversationId(data.conversationId);
-          upsertConversationSummary(data.conversationId, data.conversationTitle ?? null);
-        }
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: 'assistant',
-            content: data.reply,
-            sources: data.sources,
-            citations: data.citations,
-            timestamp: Date.now(),
+        let sawDone = false;
+        let streamedText = '';
+        await consumeChatSse(response, {
+          onMeta: (meta) => {
+            if (meta.conversationId) {
+              setConversationId(meta.conversationId);
+              upsertConversationSummary(
+                meta.conversationId,
+                meta.conversationTitle ?? null
+              );
+            }
           },
-        ]);
+          onDelta: (text) => {
+            streamedText += text;
+            setMessages((prev) => {
+              const next = [...prev];
+              for (let i = next.length - 1; i >= 0; i -= 1) {
+                if (next[i].role === 'assistant' && next[i].streaming) {
+                  next[i] = {
+                    ...next[i],
+                    content: `${next[i].content}${text}`,
+                  };
+                  break;
+                }
+              }
+              return next;
+            });
+          },
+          onDone: (data) => {
+            sawDone = true;
+            if (data.conversationId) {
+              setConversationId(data.conversationId);
+              upsertConversationSummary(
+                data.conversationId,
+                data.conversationTitle ?? null
+              );
+            }
+            patchLastAssistant({
+              content: data.reply,
+              sources: data.sources as DocumentSource[] | undefined,
+              citations: data.citations as DocumentSource[] | undefined,
+              streaming: false,
+            });
+          },
+          onError: (message) => {
+            throw new Error(message);
+          },
+        });
+
+        if (!sawDone) {
+          if (!streamedText.trim()) {
+            throw new Error('Yanıt tamamlanamadı.');
+          }
+          patchLastAssistant({ streaming: false });
+        }
       } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : 'Yanıt alınamadı.';
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: 'assistant',
-            content: `❌ Hata: ${errorMessage}`,
-            timestamp: Date.now(),
-          },
-        ]);
+        patchLastAssistant({
+          content: `❌ Hata: ${errorMessage}`,
+          streaming: false,
+          sources: undefined,
+          citations: undefined,
+        });
       } finally {
         setLoading(false);
       }
@@ -338,7 +419,8 @@ export default function Home() {
                 />
               ))}
 
-            {loading && (
+            {/* Stream balonu "Yazıyor…" gösterir; ekstra bounce yalnızca o yokken */}
+            {loading && !messages.some((m) => m.streaming) && (
               <div className="flex items-end gap-2">
                 <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-500 border border-neutral-200">
                   <Bot className="h-4 w-4" />

@@ -14,6 +14,8 @@ export interface ChatMessageData {
   /** Kaynaklar paneli için kısa liste (opsiyonel; yoksa sources’tan kısaltılır) */
   citations?: DocumentSource[];
   timestamp?: number;
+  /** SSE ile yazılırken true; kart/kaynak bitince kapanır */
+  streaming?: boolean;
 }
 
 // Backend, çoklu ürün yanıtlarında bu işareti metne yerleştirir (bkz.
@@ -53,22 +55,30 @@ export default function ChatMessage({
     }
   };
 
+  const isStreaming = Boolean(message.streaming);
   const productCards = isUser ? [] : extractProductCards(message.sources);
-  const showCarousel = productCards.length > 0 && message.content.includes(PRODUCT_CARDS_PLACEHOLDER);
+  // Stream bitmeden kart/kaynak açma — yarım placeholder + boş sources titremesin
+  const showCarousel =
+    !isStreaming &&
+    productCards.length > 0 &&
+    message.content.includes(PRODUCT_CARDS_PLACEHOLDER);
   // Kartlar tüm ürünleri `sources`ta tutar; panelde 27 satır tekrarlama.
-  const accordionSources = isUser
+  const accordionSources = isUser || isStreaming
     ? undefined
     : message.citations && message.citations.length > 0
       ? message.citations
       : showCarousel
         ? message.sources?.slice(0, 3)
         : message.sources;
+  const displayContent = isStreaming
+    ? message.content.replaceAll(PRODUCT_CARDS_PLACEHOLDER, '')
+    : message.content;
   const [beforeText, afterText] = showCarousel
     ? (() => {
-        const [first, ...rest] = message.content.split(PRODUCT_CARDS_PLACEHOLDER);
+        const [first, ...rest] = displayContent.split(PRODUCT_CARDS_PLACEHOLDER);
         return [first.trim(), rest.join(PRODUCT_CARDS_PLACEHOLDER).trim()];
       })()
-    : [message.content, ''];
+    : [displayContent, ''];
 
   return (
     <div className={`group flex items-end gap-2 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
@@ -96,6 +106,12 @@ export default function ChatMessage({
             {beforeText && (
               <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-white text-neutral-800 rounded-bl-md border border-neutral-200 shadow-sm shadow-neutral-900/5">
                 <MarkdownContent content={beforeText} />
+                {isStreaming && (
+                  <span
+                    className="ml-0.5 inline-block h-4 w-0.5 translate-y-0.5 animate-pulse bg-red-500"
+                    aria-hidden
+                  />
+                )}
               </div>
             )}
 
@@ -115,11 +131,21 @@ export default function ChatMessage({
 
             {!showCarousel && !beforeText && (
               <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-white text-neutral-800 rounded-bl-md border border-neutral-200 shadow-sm shadow-neutral-900/5">
-                <MarkdownContent content={message.content} />
+                {isStreaming && !message.content ? (
+                  <span className="text-neutral-400">Yazıyor…</span>
+                ) : (
+                  <MarkdownContent content={displayContent} />
+                )}
+                {isStreaming && (
+                  <span
+                    className="ml-0.5 inline-block h-4 w-0.5 translate-y-0.5 animate-pulse bg-red-500"
+                    aria-hidden
+                  />
+                )}
               </div>
             )}
 
-            {!isUser && <SourcesAccordion sources={accordionSources} />}
+            {!isUser && !isStreaming && <SourcesAccordion sources={accordionSources} />}
           </div>
         )}
 
