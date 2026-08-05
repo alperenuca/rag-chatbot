@@ -172,6 +172,24 @@ const CASES = [
     mustNotInclude: [/18\s*TL|elinizdeki 18|fark 447/i],
   },
   {
+    name: '15 tane alayım → stok yeterli (Ancak tuzağı yok)',
+    history: [
+      {
+        role: 'user',
+        content:
+          'Alüminyum Açılır Kapanır Çerçeve - A4 - 21x30 cm - Kırmızı - 25mm Gönye Köşe',
+      },
+      {
+        role: 'assistant',
+        content:
+          'Alüminyum Açılır Kapanır Çerçeve - A4 - 21x30 cm - Kırmızı - 25mm Gönye Köşe: satış 465 TL, stok 16.',
+      },
+    ],
+    q: '15 tane alayım',
+    mustInclude: [/evet|sipariş verebilirsiniz/i, /16|15/],
+    mustNotInclude: [/ancak/i, /\[\[URUN_KARTLARI\]\]/i],
+  },
+  {
     name: '100 adet sipariş → kilitli ürün stok (gönye katalog tuzağı)',
     history: [
       {

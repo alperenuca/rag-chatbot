@@ -86,6 +86,15 @@ const CASES = [
     mustNotInclude: [/hay[ıi]r[,.].{0,40}ücretsiz de[gğ]il/i],
   },
   {
+    name: 'Sepet 751 TL kargo ücreti (bütçe liste tuzağı)',
+    q: 'sepetimde 751 tl var kargo ücreti öder miyim',
+    mustInclude: [/hay[ıi]r|ödemez/i, /751|750/],
+    mustNotInclude: [
+      /751\s*TL\s*altı|altı\/eşit|\[\[URUN_KARTLARI\]\]/i,
+      /11 ürün|aşağıdadır/i,
+    ],
+  },
+  {
     name: 'Hediye kartı iadesi',
     q: 'Hediye kartı aldım ama kullanmayacağım, iade edebilir miyim?',
     mustInclude: [/hay[ıi]r|iade.*(edilemez|kapsam[ıi] d[ıi][sş])/i],

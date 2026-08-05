@@ -810,10 +810,14 @@ function extractRequestedPurchaseQty(message: string): number | null {
   return qty;
 }
 
+/** "15 tane alayım / alabilir miyim / sipariş vermek istiyorum" */
+const PURCHASE_QTY_INTENT_RE =
+  /(alabilir|almak|alay[ıi]m|al[ıi]r[ıi]m|sipariş|sat[ıi]n|kargo|kargola|gönder|isterim)/i;
+
 function looksLikeQuantityPurchaseQuestion(message: string): boolean {
   return (
     extractRequestedPurchaseQty(message) != null &&
-    /(alabilir|almak|sipariş|satın|kargo|kargola|gönder|isterim)/i.test(message)
+    PURCHASE_QTY_INTENT_RE.test(message)
   );
 }
 
@@ -949,12 +953,15 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     looksLikeAffordabilityQuestion(message) &&
     !/(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:altı|altında|kadar)/i.test(text) &&
     !/(en fazla|maksimum|max\.?)\s*\d+/i.test(text);
+  // "sepetimde 751 TL var kargo ücreti öder miyim?" → bütçe filtresi DEĞİL
+  const cartShippingNotBudget = looksLikeCartShippingFeeQuestion(message);
+  const skipBudgetFromAmount = affordabilityNotBudget || cartShippingNotBudget;
 
   // "300 TL ile 700 TL arasında" / "300-700 TL arası"
   const rangeMatch = text.match(
     /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:ile|-|–|—)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:arasında|aras[ıi]|aral[ıi][gğ][ıi]nda)/i
   );
-  if (!affordabilityNotBudget && rangeMatch?.[1] && rangeMatch?.[2]) {
+  if (!skipBudgetFromAmount && rangeMatch?.[1] && rangeMatch?.[2]) {
     const a = Number(rangeMatch[1].replace(',', '.'));
     const b = Number(rangeMatch[2].replace(',', '.'));
     if (Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0) {
@@ -973,7 +980,7 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     /(?:bende|elimde)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira(?:m|mız|nız)?|try)?\s*var/i,
   ];
 
-  if (!affordabilityNotBudget && filters.max_price == null) {
+  if (!skipBudgetFromAmount && filters.max_price == null) {
     for (const pattern of maxPatterns) {
       const match = text.match(pattern);
       if (match?.[1]) {
@@ -2041,6 +2048,70 @@ function extractExplicitCartAmountTl(message: string): number | null {
   }
 
   return null;
+}
+
+/**
+ * "sepetimde 751 TL var kargo ücreti öder miyim?" — politika/eşik sorusu;
+ * "751 TL altı ürün" bütçe araması değil.
+ */
+function looksLikeCartShippingFeeQuestion(message: string): boolean {
+  const t = message.toLocaleLowerCase('tr-TR');
+  if (!/kargo/i.test(t)) return false;
+  if (looksLikePartialReturnShippingDispute(message)) return false;
+  // "en ucuz A4'ten 2 adet kargo ücretsiz mi?" → ürün×adet yolu
+  if (
+    extractRequestedPurchaseQty(message) != null &&
+    /(en\s+ucuz|en\s+pahal[ıi]|afiş|çerçeve|pano|\bA\d\b|\d+\s*mm)/i.test(t)
+  ) {
+    return false;
+  }
+  const feeAsk =
+    /(kargo\s*ücret|ücret(?:i|ini)?\s*öder|öder\s*miyim|ödeyecek\s*miyim|ücretsiz\s*kargo|kargo\s*ücretsiz|ucretsiz\s*kargo|kargo\s*ucretsiz|kargo\s*var\s*m[ıi]|kargo\s*alı[nr]|kargo\s*öde)/i.test(
+      t
+    );
+  if (!feeAsk) return false;
+  return extractExplicitCartAmountTl(message) != null || /sepet/i.test(t);
+}
+
+/** Sepet tutarı × ücretsiz kargo eşiği — LLM/ürün listesi yok. */
+function buildCartShippingFeeReply(message: string): string | null {
+  if (!looksLikeCartShippingFeeQuestion(message)) return null;
+
+  const afterAdd = extractHypotheticalCartAfterAddTl(message);
+  const amount = extractExplicitCartAmountTl(message);
+  if (amount == null) return null;
+
+  // "kargo ücreti" — "kargo ücretsiz" ile karışmasın
+  const asksPayFee =
+    /(öder|ödeyecek|kargo\s*ücreti\b|ücret(?:i|ini)?\s*(?:öder|var\s*m))/i.test(
+      message.toLocaleLowerCase('tr-TR')
+    );
+  const asksFree =
+    /(ücretsiz\s*m[ıi]|ucretsiz\s*m[ıi]|kargo\s*ücretsiz|kargo\s*ucretsiz|ücretsiz\s*olur)/i.test(
+      message
+    );
+
+  if (afterAdd != null) {
+    const freeAfter = afterAdd >= FREE_SHIPPING_THRESHOLD_TL;
+    if (freeAfter) {
+      return `Şu an sepetiniz ${amount} TL; belirttiğiniz ekleme sonrası ${afterAdd} TL ≥ ${FREE_SHIPPING_THRESHOLD_TL} TL olacağı için o zaman kargo ücretsiz olur.`;
+    }
+    return `Şu an sepetiniz ${amount} TL; ekleme sonrası ${afterAdd} TL hâlâ ${FREE_SHIPPING_THRESHOLD_TL} TL eşiğinin altında — kargo ücretsiz olmaz.`;
+  }
+
+  const free = amount >= FREE_SHIPPING_THRESHOLD_TL;
+  if (free) {
+    if (asksPayFee && !asksFree) {
+      return `Hayır — sepet tutarınız ${amount} TL, ücretsiz kargo eşiği ${FREE_SHIPPING_THRESHOLD_TL} TL ve üzeri olduğu için kargo ücreti ödemezsiniz.`;
+    }
+    return `Evet — sepet tutarınız ${amount} TL ≥ ${FREE_SHIPPING_THRESHOLD_TL} TL; kargo ücretsizdir.`;
+  }
+
+  const gap = Math.round((FREE_SHIPPING_THRESHOLD_TL - amount) * 100) / 100;
+  if (asksPayFee && !asksFree) {
+    return `Evet — sepet tutarınız ${amount} TL, ücretsiz kargo eşiği ${FREE_SHIPPING_THRESHOLD_TL} TL altındadır; kargo ücreti ödersiniz. Eşiğe ${gap} TL daha eklemeniz gerekir.`;
+  }
+  return `Hayır — sepet tutarınız ${amount} TL < ${FREE_SHIPPING_THRESHOLD_TL} TL; kargo ücretsiz değildir (kargo alıcıya aittir). Eşiğe ${gap} TL kalıyor.`;
 }
 
 /**
@@ -3548,12 +3619,12 @@ export async function POST(req: NextRequest) {
 
       const pinnedProduct = productDocs[0];
 
-      // "18 tane/adet alabilir miyim?" → stok; "18 TL" sanma
+      // "18 tane alabilir miyim?" / "15 tane alayım" → stok; LLM "Ancak" tuzağı yok
       const askedQty = extractRequestedPurchaseQty(message);
       const stockQtyReply =
         askedQty != null &&
         pinnedProduct &&
-        /(alabilir|almak|sipariş|satın|isterim)/i.test(message) &&
+        looksLikeQuantityPurchaseQuestion(message) &&
         !/(kargo|ücretsiz|kargola)/i.test(message)
           ? buildStockQuantityReply(askedQty, pinnedProduct)
           : null;
@@ -3677,14 +3748,18 @@ export async function POST(req: NextRequest) {
     }
 
     // Adet × fiyat kargo ve "X var mı? Yoksa Y göster" çift isteği — LLM'siz.
-    const shippingCartResult = await resolveShippingQuantityCart(
-      message,
-      supabase,
-      knownCategories
-    );
-    const dualRequestResult = shippingCartResult
+    const cartShippingFeeReply = buildCartShippingFeeReply(message);
+    const shippingCartResult = cartShippingFeeReply
       ? null
-      : await buildAbsentThenFallbackReply(message, supabase, knownCategories);
+      : await resolveShippingQuantityCart(
+          message,
+          supabase,
+          knownCategories
+        );
+    const dualRequestResult =
+      cartShippingFeeReply || shippingCartResult
+        ? null
+        : await buildAbsentThenFallbackReply(message, supabase, knownCategories);
 
     // Renk dökümü: "hangi renkler var?" → modelin "genellikle çeşitli renkler"
     // gibi geçiştirmesi yerine katalogdaki gerçek renkleri say.
@@ -3807,6 +3882,12 @@ export async function POST(req: NextRequest) {
           rawReply = `${scopeLabel} mevcut profil kalınlıkları: ${listBit}.`;
         }
       }
+    } else if (cartShippingFeeReply) {
+      // "sepetimde 751 TL kargo ücreti öder miyim?" → eşik cevabı; 751 TL altı katalog DEĞİL
+      documents = [];
+      hasProductCards = false;
+      bypassCardSanitize = true;
+      rawReply = cartShippingFeeReply;
     } else if (shippingCartResult) {
       documents = shippingCartResult.docs;
       const shippingReply = buildShippingQuantityCartReply(shippingCartResult);
