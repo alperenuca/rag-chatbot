@@ -1,36 +1,185 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Ores RAG Chatbot
 
-## Getting Started
+Ores mağazası için Türkçe e-ticaret asistanı. Ürün kataloğu ve mağaza politikaları hakkında soruları yanıtlar; cevapları mümkün olduğunca belge ve veritabanı gerçeklerine dayandırır.
 
-First, run the development server:
+**Canlı:** [rag-chatbot-seven-beta.vercel.app](https://rag-chatbot-seven-beta.vercel.app)
+
+---
+
+## Ne işe yarar?
+
+Kullanıcı sohbette örneğin şunları sorabilir:
+
+- “500 TL altında gümüş çerçeve var mı?”
+- “Bu üründen 3 tane alırsam stok yeter mi?”
+- “İade süresi kaç gün?” / “Sepetim 749 TL, kargo ücretsiz mi?”
+
+Asistan ürün listeler, fiyat/stok bilgisi verir, politika sorularını kaynaklara bağlar ve gerektiğinde ürün kartlarıyla gösterir.
+
+---
+
+## Teknoloji
+
+| Katman | Araç |
+|--------|------|
+| Frontend | Next.js, React, Tailwind |
+| Auth & DB | Supabase (Auth, Postgres, pgvector) |
+| LLM | OpenAI (embedding, chat, tool calling) |
+| Deploy | Vercel |
+
+---
+
+## Nasıl çalışır?
+
+```
+Kullanıcı mesajı
+      ↓
+Intent / filtre anlama (fiyat, renk, kategori, stok…)
+      ↓
+┌─────────────┬──────────────┬────────────────┐
+│ Deterministik│ Tool calling │ Politika / RAG │
+│ SQL listing  │ search_products│ lazy vector   │
+└─────────────┴──────────────┴────────────────┘
+      ↓
+SSE stream → sohbet UI (adımlar + cevap + kaynaklar)
+      ↓
+Supabase’e sohbet kaydı
+```
+
+Özetle:
+
+1. **Net ürün soruları** çoğu zaman LLM’e gitmeden SQL / DB facts ile cevaplanır.
+2. **Filtre / sıralama** gerektiğinde `search_products` aracı veritabanında çalışır.
+3. **Politika ve belirsiz sorular** için embedding + vektör arama (lazy) kullanılır.
+4. Cevap **canlı stream** edilir; “Nasıl yanıtladım” adımları UI’da görünür.
+
+---
+
+## Özellikler
+
+### Sohbet
+- Markdown cevaplar, ürün carousel / kartlar
+- Kaynaklar paneli (politika ve ürün ayrımı)
+- Canlı SSE streaming ve süreç adımları
+- Çoklu sohbet geçmişi (sidebar)
+- Yanlış cevap raporlama (“Raporla”)
+
+### Akıllı ürün cevapları
+- Türkçe filtre parse: fiyat aralığı, “üzerinde / altında”, renk, mm ölçü, stok, köşe tipi
+- Konuşma takibi: ürün pin, adet, bütçe yeterliliği, kargo eşiği
+- Katalog / kategori gezinme ve sıralama (en ucuz, en ağır…)
+
+### Auth
+- Supabase ile giriş ve e-posta doğrulama
+- Kullanıcıya özel konuşma geçmişi
+
+### Admin paneli (`/admin`)
+- Allowlist ile yönetici erişimi (`ADMIN_EMAILS`)
+- Kullanıcı listesi, arama, onay durumu
+- Ban / unban
+- Popüler soru ve tema özeti
+- Gelen cevap raporlarını inceleme ve durum takibi
+
+### Veri & kalite
+- `data/urunler.csv` + `data/politikalar.md` → ingest → embeddings
+- Ürün / edge-case eval script’leri
+- SSE smoke testi
+
+---
+
+## Proje yapısı
+
+```
+src/
+  app/
+    page.tsx                 # Chat arayüzü
+    admin/                   # Yönetici paneli
+    api/
+      chat/                  # Asıl sohbet motoru
+      conversations/         # Sohbet CRUD
+      reports/               # Kullanıcı raporları
+      admin/                 # Admin API’leri
+  components/                # ChatMessage, kartlar, kaynaklar, adımlar…
+  lib/
+    chat-stream.ts           # SSE protokolü
+    supabase/                # Client / server / admin
+scripts/
+  ingest.ts                  # Veri yükleme
+  eval-*.mjs                 # Kalite testleri
+supabase/
+  chat_history_schema.sql
+  answer_reports_schema.sql
+data/
+  urunler.csv
+  politikalar.md
+```
+
+---
+
+## Kurulum
+
+### 1. Bağımlılıklar
+
+```bash
+npm install
+```
+
+### 2. Ortam değişkenleri
+
+`.env.example` dosyasını `.env.local` olarak kopyalayın:
+
+```bash
+cp .env.example .env.local
+```
+
+Doldurulması gerekenler:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `OPENAI_API_KEY`
+- `NEXT_PUBLIC_SITE_URL` (production’da auth redirect için)
+- `ADMIN_EMAILS` / `NEXT_PUBLIC_ADMIN_EMAILS` (yönetici e-postaları)
+
+### 3. Veritabanı
+
+Supabase SQL Editor’de şemaları uygulayın:
+
+- Sohbet geçmişi → `supabase/chat_history_schema.sql`
+- Cevap raporları → `supabase/answer_reports_schema.sql`
+- (Vektör arama için `documents` tablosu + `match_documents` RPC — ingest ile birlikte kullanılır)
+
+### 4. Veriyi yükleyin
+
+```bash
+npm run ingest
+```
+
+### 5. Çalıştırın
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Tarayıcı: [http://localhost:3000](http://localhost:3000)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Faydalı komutlar
 
-## Learn More
+| Komut | Açıklama |
+|-------|----------|
+| `npm run dev` | Geliştirme sunucusu |
+| `npm run build` | Production build |
+| `npm run ingest` | Ürün/politika embedding yükleme |
+| `node scripts/eval-product-questions.mjs` | Ürün soru eval |
+| `node scripts/eval-hard-questions.mjs` | Zor soru eval |
+| `node scripts/smoke-stream.mjs` | SSE smoke test |
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Notlar
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Chat mantığının büyük kısmı `src/app/api/chat/route.ts` içindedir (intent, filtre, listing, policy, tools).
+- Ürün yollarında vektör arama bilinçli olarak geciktirilir; maliyet ve hız için SQL önceliklidir.
+- Admin’e erişim yalnızca allowlist’teki e-postal adreslerine açıktır.
