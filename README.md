@@ -2,7 +2,7 @@
 
 Türkçe e-ticaret asistanı. Ürün kataloğu ve mağaza politikaları hakkında soruları yanıtlar; cevapları mümkün olduğunca belge ve veritabanı gerçeklerine dayandırır.
 
-**Canlı:** (wwww.wed1ng.shop)
+**Canlı:** (www.wed1ng.shop)
 
 ---
 
