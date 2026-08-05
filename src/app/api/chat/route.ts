@@ -632,8 +632,28 @@ function looksLikeUniversalProfileQuestion(message: string): boolean {
   );
 }
 
+/**
+ * Katalog profil soruları — pin yasak.
+ * "kaç mmlik ürünler var", "hangi ürünün kalınlığı 35 mm"
+ * NOT: "bu ürünün kalınlığı ne?" (tek ürün takibi)
+ */
+function looksLikeProfileCatalogQuestion(message: string): boolean {
+  if (looksLikeUniversalProfileQuestion(message)) return true;
+  const t = message.toLocaleLowerCase('tr-TR');
+  if (/(bu\s+ürün|bunun|gösterdiğin|o\s+ürünün|şu\s+ürün)/i.test(t)) {
+    return false;
+  }
+  if (/(kaç\s*mm|mm'?lik|mmlik)/i.test(t)) return true;
+  if (/hangi\s+ürün/i.test(t) && /(mm|profil|kalınl)/i.test(t)) return true;
+  if (/(profil|kalınlık).{0,24}(kaç|neler|hangi|var\s*mı|mevcut)/i.test(t)) {
+    return true;
+  }
+  return false;
+}
+
 function extractClaimedProfileMm(message: string): number | null {
-  const match = message.match(/\b(\d{2})\s*mm\b/i);
+  // "35 mm", "35mm", "35 mmdir" (\b mm\b "mmdir"de kırılır)
+  const match = message.match(/(\d{2})\s*mm/i);
   if (!match?.[1]) return null;
   const mm = Number(match[1]);
   return Number.isFinite(mm) && mm >= 10 && mm <= 80 ? mm : null;
@@ -759,19 +779,24 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     }
   }
 
-  // "1000 TL üzeri/üstünde", "en az 1000"
-  const minPatterns = [
-    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:üzeri|üstünde|üstü|ve üzeri)/i,
-    /(?:en az|minimum|min\.?)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?/i,
-  ];
-
-  for (const pattern of minPatterns) {
-    const match = text.match(pattern);
-    if (match?.[1]) {
-      const value = Number(match[1].replace(',', '.'));
+  // "1000 TL üzeri/üstünde" → exclusive; "en az 1000" → inclusive
+  const exclusiveMin = text.match(
+    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:üzeri|üstünde|üstü|ve üzeri)/i
+  );
+  if (exclusiveMin?.[1]) {
+    const value = Number(exclusiveMin[1].replace(',', '.'));
+    if (Number.isFinite(value) && value > 0) {
+      filters.min_price = value;
+      filters.min_price_exclusive = true;
+    }
+  } else {
+    const inclusiveMin = text.match(
+      /(?:en az|minimum|min\.?)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?/i
+    );
+    if (inclusiveMin?.[1]) {
+      const value = Number(inclusiveMin[1].replace(',', '.'));
       if (Number.isFinite(value) && value > 0) {
         filters.min_price = value;
-        break;
       }
     }
   }
@@ -830,15 +855,24 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     filters.colors = colors;
   }
 
-  // Profil kalınlığı: "32 mm", "35mm" — AMA "her çerçeve 25 mm mi?" evrensel soru;
-  // yalnızca 25 mm'ye filtreleyip "hepsi 25" demeyi engelle.
-  if (!looksLikeUniversalProfileQuestion(message)) {
-    const profileMatch = text.match(/\b(\d{2})\s*mm\b/i);
-    if (profileMatch?.[1]) {
-      const mm = Number(profileMatch[1]);
-      if (Number.isFinite(mm) && mm >= 10 && mm <= 80) {
-        filters.profile_thickness_mm = mm;
-      }
+  // Profil: "32 mm" / "35mmdir" — evrensel/katalog sorusunda filtreye çevirme
+  // (aksi halde sadece o mm kalır veya pin yolu saçmalar).
+  if (
+    !looksLikeUniversalProfileQuestion(message) &&
+    !looksLikeProfileCatalogQuestion(message)
+  ) {
+    const claimedMm = extractClaimedProfileMm(message);
+    if (claimedMm != null) {
+      filters.profile_thickness_mm = claimedMm;
+    }
+  } else if (
+    looksLikeProfileCatalogQuestion(message) &&
+    /hangi\s+ürün|hangisi|var\s*mı|yok\s*mu/i.test(message)
+  ) {
+    // "hangi ürün 35 mm?" → filtrele; "kaç mm var?" → filtreleme
+    const claimedMm = extractClaimedProfileMm(message);
+    if (claimedMm != null) {
+      filters.profile_thickness_mm = claimedMm;
     }
   }
 
@@ -1100,8 +1134,8 @@ function looksLikeProductFollowUp(message: string): boolean {
 
   // "evet başka kategoride olsun" → pin değil; alternatif kategori araması
   if (looksLikeAcceptAlternateCategory(message)) return false;
-  // "her çerçeve 25 mm mi?" → tek ürün pin'i değil
-  if (looksLikeUniversalProfileQuestion(message)) return false;
+  // "kaç mmlik ürünler var" / "hangi ürün 35 mm" → pin değil
+  if (looksLikeProfileCatalogQuestion(message)) return false;
 
   // Katalog/liste aramaları takip sorusu değildir ("indirimli ürünler hangileri").
   // Dikkat: "gösterdiğin ürün" gibi takip ifadelerinde "göster" alt dizisi
@@ -1222,6 +1256,8 @@ interface SearchProductsArgs {
   category?: string;
   max_price?: number;
   min_price?: number;
+  /** true → fiyat > min_price ("1000 TL üzeri"); false/undefined → >= */
+  min_price_exclusive?: boolean;
   in_stock_only?: boolean;
   /** true → yalnızca stok == 0 ürünler (stokta olmayanlar) */
   out_of_stock_only?: boolean;
@@ -1969,7 +2005,12 @@ async function executeSearchProducts(
     query = query.filter('metadata->price', 'lte', args.max_price);
   }
   if (typeof args.min_price === 'number' && Number.isFinite(args.min_price)) {
-    query = query.filter('metadata->price', 'gte', args.min_price);
+    // "1000 TL üzeri" → > 1000; "en az 1000" → >= 1000
+    query = query.filter(
+      'metadata->price',
+      args.min_price_exclusive ? 'gt' : 'gte',
+      args.min_price
+    );
   }
   if (args.out_of_stock_only) {
     query = query.filter('metadata->stock', 'eq', 0);
@@ -2613,41 +2654,113 @@ export async function POST(req: NextRequest) {
     const directCategoryMatches = isLikelyDirectCategoryBrowse(message, knownCategories);
     const messageFilters = extractSearchFiltersFromMessage(message);
 
-    // "her çerçevenin profili 25 mm mi?" — katalogdaki TÜM profilleri say; 25'e filtreleme
-    if (looksLikeUniversalProfileQuestion(message)) {
-      const scopeCategory =
-        findMentionedCategories(message, knownCategories)[0] ??
-        inferUserCommittedCategoryFromHistory(
-          cleanHistory,
-          message,
-          knownCategories
-        ) ??
-        knownCategories.find((c) => /çerçeve/i.test(c)) ??
-        null;
-      const surveyDocs = await executeSearchProducts(supabase, knownCategories, {
-        ...(scopeCategory ? { category: scopeCategory } : {}),
-        limit: 200,
-      });
-      const profiles = collectProfileThicknessesMm(surveyDocs);
+    // Profil katalog: "kaç mm var?" / "hangi ürün 35 mm?" / "her çerçeve 25 mi?"
+    if (looksLikeProfileCatalogQuestion(message)) {
       const claimed = extractClaimedProfileMm(message);
-      const scopeLabel = scopeCategory
-        ? `"${scopeCategory}" kategorisinde`
-        : 'katalogda';
-      const listBit =
-        profiles.length > 0
-          ? profiles.map((mm) => `${mm} mm`).join(', ')
-          : 'bilinmiyor';
+      const frameScoped =
+        looksLikeUniversalProfileQuestion(message) || /çerçeve/i.test(message);
+      const scopeCategory = frameScoped
+        ? findMentionedCategories(message, knownCategories)[0] ??
+          inferUserCommittedCategoryFromHistory(
+            cleanHistory,
+            message,
+            knownCategories
+          ) ??
+          knownCategories.find((c) => /çerçeve/i.test(c)) ??
+          null
+        : findMentionedCategories(message, knownCategories)[0] ??
+          inferUserCommittedCategoryFromHistory(
+            cleanHistory,
+            message,
+            knownCategories
+          );
 
-      documents = [];
-      hasProductCards = false;
-      if (claimed != null && profiles.length === 1 && profiles[0] === claimed) {
-        rawReply = `Evet — ${scopeLabel} ürünlerin profil kalınlığı ${claimed} mm.`;
-      } else if (claimed != null && profiles.includes(claimed) && profiles.length > 1) {
-        rawReply = `Hayır — ${scopeLabel} yalnızca ${claimed} mm değil. Mevcut profil kalınlıkları: ${listBit}. İsterseniz ${profiles.filter((p) => p !== claimed).map((p) => `${p} mm`).join(' veya ')} modelleri de gösterebilirim.`;
-      } else if (claimed != null && !profiles.includes(claimed)) {
-        rawReply = `Hayır — ${scopeLabel} ${claimed} mm profil bulunmuyor. Mevcut profiller: ${listBit}.`;
+      const wantsProductForMm =
+        claimed != null &&
+        (/hangi\s+ürün|hangisi|var\s*mı|yok\s*mu|bulun/i.test(message) ||
+          messageFilters.profile_thickness_mm != null);
+
+      if (wantsProductForMm && claimed != null) {
+        let profileDocs = await executeSearchProducts(supabase, knownCategories, {
+          ...(scopeCategory ? { category: scopeCategory } : {}),
+          profile_thickness_mm: claimed,
+          sort_by: 'price_asc',
+          limit: 50,
+        });
+        // Kategori daraltması 35 mm panoyu kaçırırsa tüm katalogda ara
+        if (profileDocs.length === 0 && scopeCategory) {
+          profileDocs = await executeSearchProducts(supabase, knownCategories, {
+            profile_thickness_mm: claimed,
+            sort_by: 'price_asc',
+            limit: 50,
+          });
+        }
+        documents = profileDocs;
+        const profileDerived = buildDerivedPromptFields(documents, true);
+        hasProductCards = profileDerived.hasProductCards;
+        if (documents.length === 0) {
+          const surveyDocs = await executeSearchProducts(supabase, knownCategories, {
+            limit: 200,
+          });
+          const allProfiles = collectProfileThicknessesMm(surveyDocs);
+          rawReply = `Hayır — ${claimed} mm profil kalınlığında ürün bulunamadı. Mevcut profiller: ${
+            allProfiles.length ? allProfiles.map((mm) => `${mm} mm`).join(', ') : 'bilinmiyor'
+          }.`;
+          hasProductCards = false;
+        } else {
+          const names = documents
+            .map((doc) =>
+              typeof doc.metadata?.title === 'string' ? doc.metadata.title.trim() : ''
+            )
+            .filter(Boolean)
+            .slice(0, 5);
+          rawReply = `Evet — ${claimed} mm profil kalınlığında ${documents.length} ürün var${
+            names.length ? `: ${names.join('; ')}` : ''
+          }.\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nİlgilendiğiniz modeli inceleyelim mi?`;
+          hasProductCards = true;
+        }
       } else {
-        rawReply = `${scopeLabel} mevcut profil kalınlıkları: ${listBit}.`;
+        const surveyDocs = await executeSearchProducts(supabase, knownCategories, {
+          ...(scopeCategory ? { category: scopeCategory } : {}),
+          limit: 200,
+        });
+        const profiles = collectProfileThicknessesMm(surveyDocs);
+        const scopeLabel = scopeCategory
+          ? `"${scopeCategory}" kategorisinde`
+          : 'katalogda';
+        const listBit =
+          profiles.length > 0
+            ? profiles.map((mm) => `${mm} mm`).join(', ')
+            : 'bilinmiyor';
+
+        documents = [];
+        hasProductCards = false;
+        if (
+          looksLikeUniversalProfileQuestion(message) &&
+          claimed != null &&
+          profiles.length === 1 &&
+          profiles[0] === claimed
+        ) {
+          rawReply = `Evet — ${scopeLabel} ürünlerin profil kalınlığı ${claimed} mm.`;
+        } else if (
+          looksLikeUniversalProfileQuestion(message) &&
+          claimed != null &&
+          profiles.includes(claimed) &&
+          profiles.length > 1
+        ) {
+          rawReply = `Hayır — ${scopeLabel} yalnızca ${claimed} mm değil. Mevcut profil kalınlıkları: ${listBit}. İsterseniz ${profiles
+            .filter((p) => p !== claimed)
+            .map((p) => `${p} mm`)
+            .join(' veya ')} modelleri de gösterebilirim.`;
+        } else if (
+          looksLikeUniversalProfileQuestion(message) &&
+          claimed != null &&
+          !profiles.includes(claimed)
+        ) {
+          rawReply = `Hayır — ${scopeLabel} ${claimed} mm profil bulunmuyor. Mevcut profiller: ${listBit}.`;
+        } else {
+          rawReply = `${scopeLabel} mevcut profil kalınlıkları: ${listBit}.`;
+        }
       }
     } else if (acceptAlternateCategory) {
       const altCategory =
@@ -3434,6 +3547,8 @@ export async function POST(req: NextRequest) {
             ...args,
             max_price: args.max_price ?? messageFilters.max_price,
             min_price: args.min_price ?? messageFilters.min_price,
+            min_price_exclusive:
+              args.min_price_exclusive ?? messageFilters.min_price_exclusive,
             out_of_stock_only: outOfStock,
             // Stokta olmayan aramasında in_stock_only asla true kalmasın
             in_stock_only: outOfStock
