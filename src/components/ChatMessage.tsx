@@ -67,9 +67,11 @@ export default function ChatMessage({
     productCards.length > 0 &&
     message.content.includes(PRODUCT_CARDS_PLACEHOLDER);
   // Kartlar tüm ürünleri `sources`ta tutar; panelde 27 satır tekrarlama.
+  // citations açıkça geldiyse (boş dizi dahil) ona uy — aksi halde politika
+  // cevabında boş citations varken sources’taki ürünler panele sızıyordu.
   const accordionSources = isUser || isStreaming
     ? undefined
-    : message.citations && message.citations.length > 0
+    : message.citations !== undefined
       ? message.citations
       : showCarousel
         ? message.sources?.slice(0, 3)

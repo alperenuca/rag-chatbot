@@ -101,36 +101,56 @@ function looksLikeNarrowContactQuestion(message: string): boolean {
   );
 }
 
-/** Soruda geçen iletişim/politika terimleri chunk metninde yoksa kaynak sayma */
+/**
+ * Soruda geçen politika konuları chunk'ta yoksa kaynak sayma.
+ * Eş anlamlı gruplar: "kusurlu" sorusu "hasarlı" chunk'ına da uyumlu sayılsın.
+ */
 function policyChunkRelevantToMessage(
   doc: MatchedDocument,
   message: string
 ): boolean {
   const msg = message.toLocaleLowerCase('tr-TR');
   const content = doc.content.toLocaleLowerCase('tr-TR');
-  const topicTerms = [
-    'sosyal',
-    'instagram',
-    'facebook',
-    'youtube',
-    'twitter',
-    'linkedin',
-    'whatsapp',
-    'telefon',
-    'e-posta',
-    'email',
-    'iade',
-    'kargo',
-    'teslimat',
-    'garanti',
-    'gizlilik',
-    'ödeme',
-    'fatura',
-    'kvkk',
+  const topicGroups: string[][] = [
+    [
+      'iade',
+      'cayma',
+      'değişim',
+      'degisim',
+      'kusurlu',
+      'hasar',
+      'hasarlı',
+      'hasarli',
+      'kırık',
+      'kirik',
+      'bozuk',
+      'defolu',
+      'tutanak',
+      'yanlış ürün',
+      'yanlis urun',
+    ],
+    ['kargo', 'teslimat', 'gönderim', 'gonderim'],
+    ['garanti'],
+    ['gizlilik', 'kvkk', 'kişisel veri', 'kisisel veri'],
+    ['ödeme', 'odeme', 'fatura', 'iyzico', 'havale'],
+    [
+      'sosyal',
+      'instagram',
+      'facebook',
+      'youtube',
+      'twitter',
+      'linkedin',
+      'whatsapp',
+    ],
+    ['telefon', 'e-posta', 'email', 'iletişim', 'iletisim', 'mesai'],
   ];
-  const mentioned = topicTerms.filter((term) => msg.includes(term));
-  if (mentioned.length === 0) return true;
-  return mentioned.some((term) => content.includes(term));
+  const matchedGroups = topicGroups.filter((group) =>
+    group.some((term) => msg.includes(term))
+  );
+  if (matchedGroups.length === 0) return true;
+  return matchedGroups.some((group) =>
+    group.some((term) => content.includes(term))
+  );
 }
 
 /**
@@ -220,24 +240,34 @@ function buildCitationSources(
     policies = topicalPolicies;
   }
 
+  // Politika sorusunda ürün CSV kaynakları yanıltıcı (kusurlu iade → 3 çerçeve)
+  const policyOnlyCitations =
+    looksLikePolicyQuestion(message) && !hasNewSearchCriterion(message);
+
   const products = documents.filter((doc) => doc.metadata?.type === 'product');
-  const pool =
-    policies.length > 0
+  const pool = policyOnlyCitations
+    ? bySimilarity(policies)
+    : policies.length > 0
       ? [...bySimilarity(policies), ...bySimilarity(products)]
       : products.length > 0
         ? bySimilarity(products)
         : bySimilarity(documents.filter((doc) => !isLowValuePolicyChunk(doc)));
 
   let ranked = dedupeDocuments(pool);
+  if (ranked.length === 0) return [];
 
   // Zayıf eşleşmeleri kes (en iyi kaynağı her zaman tut)
   if (ranked.length > 1 && typeof ranked[0].similarity === 'number') {
-    const top = ranked[0].similarity;
+    const top = ranked[0].similarity!;
     ranked = ranked.filter((doc, index) => {
       if (index === 0) return true;
       if (typeof doc.similarity !== 'number') return false;
-      if (doc.similarity < MIN_CITATION_SIMILARITY) return false;
-      return doc.similarity >= top - 0.06;
+      // Politika chunk benzerlikleri genelde ürünlerden düşük; eşiği gevşet
+      const floor = policyOnlyCitations
+        ? Math.min(MIN_CITATION_SIMILARITY, 0.28)
+        : MIN_CITATION_SIMILARITY;
+      if (doc.similarity < floor) return false;
+      return doc.similarity >= top - (policyOnlyCitations ? 0.12 : 0.06);
     });
   }
 
@@ -3026,14 +3056,18 @@ async function fetchBaselineDocuments(
   message: string,
   cleanHistory: HistoryTurn[]
 ): Promise<{ documents: MatchedDocument[]; error: unknown | null }> {
+  const isPolicyQuestion = looksLikePolicyQuestion(message);
+
   // Takip soruları tek başına embed edilirse sapabiliyor; son asistan
   // yanıtını da embedding girdisine ekle.
+  // Politika sorusunda ürün listeli asistan cevabı embedding'i çerçeveye çeker.
   const lastAssistantMessage = cleanHistory
     .filter((turn) => turn.role === 'assistant')
     .slice(-1)[0]?.content;
-  const embeddingInput = lastAssistantMessage
-    ? `${lastAssistantMessage.slice(0, 2000)}\n\n${message}`
-    : message;
+  const embeddingInput =
+    isPolicyQuestion || !lastAssistantMessage
+      ? message
+      : `${lastAssistantMessage.slice(0, 2000)}\n\n${message}`;
 
   const embeddingResponse = await openai.embeddings.create({
     model: 'text-embedding-3-small',
@@ -3042,19 +3076,47 @@ async function fetchBaselineDocuments(
   const queryEmbedding = embeddingResponse.data[0].embedding;
 
   // Politika chunk'ları ürünlere göre daha düşük benzerlik verebiliyor.
-  const isPolicyQuestion = looksLikePolicyQuestion(message);
   const { data: matchedDocs, error: matchError } = await supabase.rpc('match_documents', {
     query_embedding: queryEmbedding,
     match_threshold: isPolicyQuestion ? 0.15 : 0.3,
-    match_count: 8,
+    match_count: isPolicyQuestion ? 12 : 8,
   });
 
   if (matchError) {
     return { documents: [], error: matchError };
   }
 
+  let documents = (matchedDocs ?? []) as MatchedDocument[];
+
+  // Politika sorusunda ürünler baskınsa politika odaklı ikinci arama yap
+  if (isPolicyQuestion) {
+    const policyCount = documents.filter(
+      (doc) => doc.metadata?.type === 'policy' && !isLowValuePolicyChunk(doc)
+    ).length;
+    if (policyCount < 2) {
+      const policyBoost = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: `ORES iade hasarlı kusurlu ürün politika kargo tutanak: ${message}`,
+      });
+      const { data: policyMatched, error: policyErr } = await supabase.rpc(
+        'match_documents',
+        {
+          query_embedding: policyBoost.data[0].embedding,
+          match_threshold: 0.12,
+          match_count: 12,
+        }
+      );
+      if (!policyErr && policyMatched) {
+        const extra = (policyMatched as MatchedDocument[]).filter(
+          (doc) => doc.metadata?.type === 'policy' && !isLowValuePolicyChunk(doc)
+        );
+        documents = dedupeDocuments([...extra, ...documents]);
+      }
+    }
+  }
+
   return {
-    documents: (matchedDocs ?? []) as MatchedDocument[],
+    documents,
     error: null,
   };
 }

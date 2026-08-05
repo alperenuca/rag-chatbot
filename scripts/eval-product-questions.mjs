@@ -286,6 +286,31 @@ const CASES = [
     maxProductSources: 0,
   },
   {
+    name: 'Kusurlu ürün politikası → kaynaklarda çerçeve olmasın',
+    history: [
+      { role: 'user', content: 'afiş çerçevesi' },
+      {
+        role: 'assistant',
+        content:
+          'Afiş çerçevesi kategorisinde ürünlerimiz aşağıdadır.\n\n[[URUN_KARTLARI]]\n\nİlgilendiğiniz bir model var mı?',
+      },
+    ],
+    q: 'anladım peki ya ürün kusurlu gelirse ne olacak',
+    mustInclude: [/iletisim@ores\.com\.tr|hasar|iade|tutanak/i],
+    maxProductSources: 0,
+    assertSources: (sources) => {
+      const products = (sources || []).filter(
+        (s) => s?.metadata?.type === 'product' || s?.metadata?.source === 'urunler.csv'
+      );
+      if (products.length > 0) {
+        return `politika cevabında ürün kaynağı (${products.length}): ${products
+          .map((s) => s?.metadata?.title || s?.metadata?.source)
+          .join(', ')}`;
+      }
+      return null;
+    },
+  },
+  {
     name: 'Sadece bütçe: asistan menüsü panoya kilitlemesin',
     history: [
       { role: 'user', content: 'ürün satın almak istiyorum' },
@@ -685,7 +710,8 @@ async function main() {
       try {
         const json = JSON.parse(text);
         reply = json.reply ?? json.message ?? json.error ?? text;
-        sources = json.sources ?? [];
+        // Kaynak paneli citations ile gelir; yoksa sources
+        sources = Array.isArray(json.citations) ? json.citations : json.sources ?? [];
         if (json.error && json.reply == null) reply = `ERROR: ${json.error}`;
       } catch {
         /* raw */
