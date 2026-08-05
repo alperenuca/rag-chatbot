@@ -1088,9 +1088,9 @@ function findSuperlativeDoc(
 
 /**
  * "En ağır çerçeve aynı zamanda en ucuz mu?" gibi iki üstünlük içeren sorularda
- * bağlamda tek ürün kaldığı için model diğer ucu uyduruyordu; iki ucu da yazar.
+ * iki ucu katalogdan hesaplar (LLM'e bırakılmaz).
  */
-function buildCrossSuperlativeGuard(message: string, docs: MatchedDocument[]): string {
+function buildCrossSuperlativeReply(message: string, docs: MatchedDocument[]): string {
   const asked = SUPERLATIVE_PATTERNS.filter((entry) => entry.pattern.test(message));
   if (asked.length < 2) return '';
   const products = docs.filter((doc) => doc.metadata?.type === 'product');
@@ -1110,9 +1110,265 @@ function buildCrossSuperlativeGuard(message: string, docs: MatchedDocument[]): s
 
   const sameProduct = titles.every((title) => title === titles[0]);
   const verdict = sameProduct
-    ? 'Bu iki uç AYNI ürün → soruya "Evet, aynı ürün" diye cevap verebilirsin.'
-    : 'Bu iki uç FARKLI ürünler → soruya "Hayır" ile başla. "Aynı ürün", "aynı fiyata sahip", "hem en ağır hem en ucuz" gibi ifadeleri KULLANMA; her ucu kendi ürünü ve değeriyle ayrı yaz.';
-  return `ÇOKLU ÜSTÜNLÜK KARŞILAŞTIRMASI (KESİN — katalogdaki gerçek uçlar):\n${lines.join('\n')}\n${verdict}\n\n`;
+    ? 'Evet — bu iki uç aynı ürün.'
+    : 'Hayır — bu iki uç farklı ürünler; ağırlık ile fiyat aynı şey değildir.';
+  return `${verdict}\n\n${lines.join('\n')}\n\nBu modellerden hangisini daha yakından inceleyelim?`;
+}
+
+/** @deprecated prompt guard; cevap artık buildCrossSuperlativeReply ile üretilir */
+function buildCrossSuperlativeGuard(message: string, docs: MatchedDocument[]): string {
+  const reply = buildCrossSuperlativeReply(message, docs);
+  return reply ? `ÇOKLU ÜSTÜNLÜK KARŞILAŞTIRMASI (KESİN):\n${reply}\n\n` : '';
+}
+
+interface DeterministicListingOptions {
+  docs: MatchedDocument[];
+  message: string;
+  kind:
+    | 'filter'
+    | 'rank'
+    | 'category'
+    | 'all'
+    | 'count'
+    | 'oos'
+    | 'discount'
+    | 'alternate'
+    | 'tool';
+  category?: string | null;
+  categories?: string[];
+  maxPrice?: number;
+  color?: string;
+  colors?: string[];
+  dimension?: string;
+  profileMm?: number | null;
+  cornerType?: CornerType | null;
+  cornerCounts?: { gönye: number; rondo: number } | null;
+  requestedCount?: number;
+  wantsSingle?: boolean;
+  sortBy?: SortBy;
+  /** Çoklu üstünlük için kırpılmamış havuz */
+  rankPool?: MatchedDocument[];
+  alternateBudget?: number | null;
+}
+
+/**
+ * DB arama sonucundan kartlı ürün cevabı üretir. Hesap/filtre LLM'e bırakılmaz;
+ * metin yalnızca kısa özet + [[URUN_KARTLARI]] + CTA (veya özel karşılaştırma).
+ */
+function buildDeterministicListingReply(opts: DeterministicListingOptions): {
+  reply: string;
+  hasProductCards: boolean;
+  bypassCardSanitize: boolean;
+} {
+  const products = opts.docs.filter((doc) => doc.metadata?.type === 'product');
+  const count = products.length;
+  const scopeLabel = opts.category
+    ? `"${opts.category}" kategorisinde`
+    : opts.categories && opts.categories.length > 0
+      ? `"${opts.categories.join(' / ')}" kategorisinde`
+      : 'kataloğumuzda';
+  const cta =
+    'Listedeki ürünlerden ilgilendiğiniz veya detaylı bilgi almak istediğiniz bir model var mı?';
+
+  // 1) Renk karşılaştırması
+  const colors = opts.colors ?? [];
+  if (colors.length > 1) {
+    const compare = buildColorCompareReply(
+      products,
+      colors,
+      opts.message,
+      opts.dimension
+    );
+    if (compare) {
+      const hasAny = colors.some((color) => findDocByColor(products, color));
+      return {
+        reply: hasAny
+          ? `${compare}\n\n${PRODUCT_CARDS_PLACEHOLDER}`
+          : compare,
+        hasProductCards: hasAny,
+        bypassCardSanitize: true,
+      };
+    }
+  }
+
+  // 2) Çoklu üstünlük (en ağır + en ucuz …)
+  const pool = opts.rankPool ?? products;
+  const cross = buildCrossSuperlativeReply(opts.message, pool);
+  if (cross) {
+    return {
+      reply:
+        count > 0
+          ? `${cross}\n\n${PRODUCT_CARDS_PLACEHOLDER}`
+          : cross,
+      hasProductCards: count > 0,
+      bypassCardSanitize: true,
+    };
+  }
+
+  // 3) Boş sonuç
+  if (count === 0) {
+    if (opts.kind === 'alternate') {
+      return {
+        reply: `Üzgünüm, "${opts.category ?? 'bu kategori'}"${
+          opts.alternateBudget != null
+            ? ` için ${opts.alternateBudget} TL altında`
+            : ''
+        } şu an uygun ürün bulamadım. Bütçeyi yükseltmek veya başka bir filtre denemek ister misiniz?`,
+        hasProductCards: false,
+        bypassCardSanitize: false,
+      };
+    }
+    if (opts.maxPrice != null && opts.category) {
+      return {
+        reply: `Hayır, ${scopeLabel} ${opts.maxPrice} TL ve altında ürün bulunmamaktadır. Daha yüksek bir bütçe veya başka bir kategori denemek ister misiniz?`,
+        hasProductCards: false,
+        bypassCardSanitize: false,
+      };
+    }
+    if (opts.kind === 'oos') {
+      return {
+        reply: `${scopeLabel} şu an stokta olmayan ürün bulunamadı. Stoktakileri listelememi ister misiniz?`,
+        hasProductCards: false,
+        bypassCardSanitize: false,
+      };
+    }
+    if (opts.kind === 'discount') {
+      return {
+        reply: `${scopeLabel} şu an indirimli ürün bulunamadı. Başka bir filtre denemek ister misiniz?`,
+        hasProductCards: false,
+        bypassCardSanitize: false,
+      };
+    }
+    const bits: string[] = [];
+    if (opts.dimension) bits.push(`${opts.dimension} ölçü`);
+    if (opts.color) bits.push(`${opts.color} renk`);
+    if (opts.profileMm != null) bits.push(`${opts.profileMm} mm profil`);
+    if (opts.cornerType) bits.push(`${opts.cornerType} köşe`);
+    if (opts.maxPrice != null) bits.push(`${opts.maxPrice} TL altı`);
+    const criteria = bits.length > 0 ? bits.join(' + ') : 'bu';
+    return {
+      reply: `${scopeLabel} ${criteria} kriterlerine uyan ürün bulunamadı. Filtreyi gevşetmeyi veya başka bir kategori denemeyi ister misiniz?`,
+      hasProductCards: false,
+      bypassCardSanitize: false,
+    };
+  }
+
+  // 4) Dolu sonuç — kısa özet
+  const allOos = products.every((doc) => doc.metadata?.stock === 0);
+  // oos kind zaten özetinde stok durumunu söylüyor; tekrarlama.
+  const stockNote =
+    allOos && opts.kind !== 'oos' ? ' Bu ürünler şu an stokta yok.' : '';
+
+  let summary: string;
+  if (opts.kind === 'all') {
+    summary = `Mağazamızdaki ${count} ürünü aşağıda inceleyebilirsiniz.`;
+  } else if (opts.kind === 'count' || opts.kind === 'category') {
+    summary = `${scopeLabel} toplam ${count} ürün bulunmaktadır. İlgili ürünleri aşağıda görebilirsiniz.`;
+  } else if (opts.kind === 'alternate') {
+    summary = `"${opts.category}" kategorisinde${
+      opts.alternateBudget != null ? ` ${opts.alternateBudget} TL altındaki` : ''
+    } ürünlerimizi aşağıda inceleyebilirsiniz.`;
+  } else if (opts.kind === 'oos') {
+    summary =
+      count === 1
+        ? `${scopeLabel} stokta olmayan ürün aşağıdadır; şu an stokta yok.`
+        : `${scopeLabel} stokta olmayan ${count} ürün aşağıdadır; şu an stokta yoklar.`;
+  } else if (opts.kind === 'discount') {
+    summary =
+      count === 1
+        ? `${scopeLabel} indirimli ürün aşağıdadır.`
+        : `${scopeLabel} ${count} indirimli ürün aşağıdadır.`;
+  } else if (opts.cornerType && opts.cornerCounts) {
+    summary = `${scopeLabel} gönye köşe ${opts.cornerCounts.gönye} ürün, rondo köşe ${opts.cornerCounts.rondo} ürün bulunuyor. Aşağıdaki kartlarda ${opts.cornerType} köşeli ${count} ürünü görüyorsunuz.`;
+  } else if (opts.profileMm != null) {
+    summary = `Evet — ${opts.profileMm} mm profil kalınlığında ${count} ürün var. Tümünü aşağıdaki kartlarda inceleyebilirsiniz.`;
+  } else if (opts.color) {
+    summary = `Evet, ${opts.color} renkte ${count} ürünümüz aşağıdadır.`;
+  } else if (opts.dimension && opts.maxPrice != null) {
+    summary = `Evet, ${opts.dimension} ölçüsünde ${opts.maxPrice} TL altı/eşit ${count} ürün aşağıdadır.`;
+  } else if (opts.dimension) {
+    summary = `Evet, ${opts.dimension} ölçüsünde ${count} ürünümüz aşağıdadır.`;
+  } else if (opts.maxPrice != null) {
+    summary = `Evet, ${opts.maxPrice} TL altı/eşit ${count} ürün aşağıdadır.`;
+  } else if (opts.wantsSingle || opts.kind === 'rank') {
+    const title =
+      typeof products[0].metadata?.title === 'string'
+        ? products[0].metadata.title
+        : 'ürün';
+    const price = products[0].metadata?.price;
+    const weight = products[0].metadata?.weight_kg;
+    const sortHint =
+      opts.sortBy === 'weight_desc'
+        ? 'En ağır'
+        : opts.sortBy === 'weight_asc'
+          ? 'En hafif'
+          : opts.sortBy === 'price_desc'
+            ? 'En pahalı'
+            : 'En ucuz';
+    if (opts.requestedCount && opts.requestedCount > 0) {
+      summary =
+        count < opts.requestedCount
+          ? `İstediğiniz ${opts.requestedCount} yerine bu kritere uyan ${count} ürün bulundu; aşağıda görebilirsiniz.`
+          : `${sortHint} ${count} ürün aşağıdadır.`;
+    } else if (count > 1) {
+      summary = `${sortHint} değerde ${count} ürün berabere; aşağıda görebilirsiniz.`;
+    } else {
+      const priceBit = typeof price === 'number' ? ` (${price} TL)` : '';
+      const weightBit = typeof weight === 'number' ? `, ${weight} kg` : '';
+      summary = `${scopeLabel} ${sortHint.toLocaleLowerCase('tr-TR')} ürün: ${title}${priceBit}${weightBit}.`;
+    }
+  } else {
+    summary = `Evet, kriterinize uyan ${count} ürün aşağıdadır.`;
+  }
+
+  // "50 adet almak istiyorum" → stok yetersizse onaylama
+  const wantQty = opts.message.match(/(\d+)\s*adet/i);
+  const askedQty = wantQty?.[1] ? Number(wantQty[1]) : null;
+  if (
+    askedQty != null &&
+    Number.isFinite(askedQty) &&
+    askedQty > 0 &&
+    products.length === 1 &&
+    typeof products[0].metadata?.stock === 'number' &&
+    products[0].metadata.stock < askedQty
+  ) {
+    const stock = products[0].metadata.stock;
+    const title =
+      typeof products[0].metadata?.title === 'string'
+        ? products[0].metadata.title
+        : 'Bu ürün';
+    summary = `Hayır — ${title} için stokta yalnızca ${stock} adet var; ${askedQty} adet için stok yetersiz.`;
+  }
+
+  let body = `${summary}${stockNote}\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\n${cta}`;
+
+  // İndirim + fiyat sorusu: liste/indirimli fiyatı metne yaz
+  if (
+    opts.kind === 'discount' &&
+    /(liste\s*fiyat|indirimli\s*fiyat|fiyatı\s*nedir|fiyati\s*nedir)/i.test(opts.message)
+  ) {
+    const doc = products[0];
+    const title =
+      typeof doc.metadata?.title === 'string' ? doc.metadata.title : 'Ürün';
+    const listPrice = doc.metadata?.list_price;
+    const salePrice = doc.metadata?.price;
+    body = `${title} — Liste: ${
+      typeof listPrice === 'number' ? `${listPrice} TL` : 'yok'
+    }; İndirimli/satış: ${
+      typeof salePrice === 'number' ? `${salePrice} TL` : 'yok'
+    }.\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\n${cta}`;
+  }
+
+  if (wantsInlinePriceStockSummary(opts.message)) {
+    const priceStock = buildProductPriceStockSummary(products)
+      .replace(/^FİYAT\/STOK ÖZETİ[^\n]*\n/, '')
+      .trim();
+    if (priceStock) {
+      body = `${summary}${stockNote}\n\n${priceStock}\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\n${cta}`;
+    }
+  }
+
+  return { reply: body, hasProductCards: true, bypassCardSanitize: false };
 }
 
 /** İki+ renk karşılaştırması için bağlama zorunlu fiyat özeti. */
@@ -1749,27 +2005,38 @@ function shippingThresholdHint(message: string): string {
 
 /**
  * "En ucuz A4'ten 2 adet alırsam kargo ücretsiz mi?" → birim fiyatı DB'den alıp
- * sepet toplamını kesin hesaplar.
+ * sepet toplamını kesin hesaplar (LLM yok).
  */
-async function shippingQuantityCartHint(
+async function resolveShippingQuantityCart(
   message: string,
   supabase: Awaited<ReturnType<typeof createClient>>,
   knownCategories: string[]
-): Promise<string> {
-  if (!/(kargo|ücretsiz)/i.test(message)) return '';
-  if (looksLikePartialReturnShippingDispute(message)) return '';
+): Promise<{
+  docs: MatchedDocument[];
+  unit: number;
+  qty: number;
+  total: number;
+  free: boolean;
+  title: string;
+} | null> {
+  if (!/(kargo|ücretsiz)/i.test(message)) return null;
+  if (looksLikePartialReturnShippingDispute(message)) return null;
   const qtyMatch = message.match(/(\d+)\s*adet/i);
-  if (!qtyMatch?.[1]) return '';
+  if (!qtyMatch?.[1]) return null;
   // Açık TL tutarı varsa miktar×fiyat hesabına gerek yok
-  if (extractExplicitCartAmountTl(message) != null) return '';
+  if (extractExplicitCartAmountTl(message) != null) return null;
 
   const qty = Number(qtyMatch[1]);
-  if (!Number.isFinite(qty) || qty <= 0 || qty > 500) return '';
+  if (!Number.isFinite(qty) || qty <= 0 || qty > 500) return null;
 
   const filters = extractSearchFiltersFromMessage(message);
   const categories = findMentionedCategories(message, knownCategories);
+  const frameCategory =
+    categories[0] ??
+    knownCategories.find((category) => /çerçeve/i.test(category)) ??
+    null;
   const docs = await executeSearchProducts(supabase, knownCategories, {
-    ...(categories[0] ? { category: categories[0] } : {}),
+    ...(frameCategory ? { category: frameCategory } : {}),
     dimension: filters.dimension,
     color: filters.color,
     in_stock_only: true,
@@ -1780,18 +2047,114 @@ async function shippingQuantityCartHint(
   const unit = docs[0]?.metadata?.price;
   const title = typeof docs[0]?.metadata?.title === 'string' ? docs[0].metadata.title : 'ürün';
   if (typeof unit !== 'number' || !Number.isFinite(unit) || unit <= 0) {
-    return '';
+    return null;
   }
 
   const total = Math.round(unit * qty * 100) / 100;
   const free = total >= FREE_SHIPPING_THRESHOLD_TL;
+  return { docs, unit, qty, total, free, title };
+}
+
+async function shippingQuantityCartHint(
+  message: string,
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  knownCategories: string[]
+): Promise<string> {
+  const cart = await resolveShippingQuantityCart(message, supabase, knownCategories);
+  if (!cart) return '';
   return [
-    `SEPET HESABI (KESİN — KARGO): "${title}" birim fiyat ${unit} TL × ${qty} adet = ${total} TL.`,
-    free
-      ? `${total} TL ≥ ${FREE_SHIPPING_THRESHOLD_TL} TL → kargo ÜCRETSİZ. Cevaba "Evet" ile başla.`
-      : `${total} TL < ${FREE_SHIPPING_THRESHOLD_TL} TL → kargo ÜCRETSİZ DEĞİL. Cevaba "Hayır" ile başla.`,
+    `SEPET HESABI (KESİN — KARGO): "${cart.title}" birim fiyat ${cart.unit} TL × ${cart.qty} adet = ${cart.total} TL.`,
+    cart.free
+      ? `${cart.total} TL ≥ ${FREE_SHIPPING_THRESHOLD_TL} TL → kargo ÜCRETSİZ. Cevaba "Evet" ile başla.`
+      : `${cart.total} TL < ${FREE_SHIPPING_THRESHOLD_TL} TL → kargo ÜCRETSİZ DEĞİL. Cevaba "Hayır" ile başla.`,
     'Adet sayısını (örn. 2) asla TL tutarı gibi kullanma.',
   ].join('\n');
+}
+
+function buildShippingQuantityCartReply(cart: {
+  docs: MatchedDocument[];
+  unit: number;
+  qty: number;
+  total: number;
+  free: boolean;
+  title: string;
+}): { reply: string; hasProductCards: boolean } {
+  const head = cart.free
+    ? `Evet — "${cart.title}" birim ${cart.unit} TL × ${cart.qty} adet = ${cart.total} TL; ücretsiz kargo eşiği ${FREE_SHIPPING_THRESHOLD_TL} TL olduğu için kargo ücretsiz olur.`
+    : `Hayır — "${cart.title}" birim ${cart.unit} TL × ${cart.qty} adet = ${cart.total} TL; ücretsiz kargo için ${FREE_SHIPPING_THRESHOLD_TL} TL eşiğinin altında kalıyor.`;
+  return {
+    reply: `${head}\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nBu modeli inceleyelim mi?`,
+    hasProductCards: cart.docs.length > 0,
+  };
+}
+
+/**
+ * "Sizde X var mı? Yoksa en ucuz 3 çerçeveyi göster" — katalog dışı ürünü
+ * reddedip ikinci isteği SQL ile karşılar.
+ */
+async function buildAbsentThenFallbackReply(
+  message: string,
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  knownCategories: string[]
+): Promise<{ reply: string; docs: MatchedDocument[]; hasProductCards: boolean } | null> {
+  if (!/(yoksa|değilse|degilse)/i.test(message)) return null;
+  const parts = message.split(/yoksa|değilse|degilse/i);
+  if (parts.length < 2) return null;
+  const first = parts[0] ?? '';
+  const second = parts.slice(1).join(' ');
+  if (!/var\s*m[ıi]|yok\s*mu|bulun/i.test(first)) return null;
+
+  // İlk kısımda bilinen kategori yoksa ve katalog-dışı bir şey soruluyorsa devam.
+  const firstCats = findMentionedCategories(first, knownCategories);
+  const absentHints: string[] = [];
+  if (/mouse\s*pad/i.test(first)) absentHints.push('mouse pad');
+  if (/iphone|kılıf|kilif/i.test(first)) absentHints.push('iPhone kılıfı');
+  if (/koltuk|masa|laptop|telefon/i.test(first) && firstCats.length === 0) {
+    const rough = first
+      .replace(/sizde|var mı|var mi|yok mu| bulur musunuz|\?/gi, '')
+      .trim();
+    if (rough) absentHints.push(rough.slice(0, 48));
+  }
+  if (absentHints.length === 0 && firstCats.length === 0) {
+    absentHints.push('istediğiniz ürün');
+  }
+  if (firstCats.length > 0 && absentHints.length === 0) return null;
+
+  const secondFilters = extractSearchFiltersFromMessage(second);
+  const secondCats = findMentionedCategories(second, knownCategories);
+  const frameCategory =
+    secondCats[0] ??
+    knownCategories.find((category) => /çerçeve/i.test(category)) ??
+    null;
+  const countMatch = second.match(/en (?:ucuz|pahalı|pahali|ağır|agir|hafif)\s+(\d+)/i);
+  const limit =
+    countMatch?.[1] && Number.isFinite(Number(countMatch[1]))
+      ? Math.min(Number(countMatch[1]), 50)
+      : 3;
+
+  const docs = await executeSearchProducts(supabase, knownCategories, {
+    ...(frameCategory ? { category: frameCategory } : {}),
+    ...secondFilters,
+    sort_by: secondFilters.sort_by ?? 'price_asc',
+    limit,
+  });
+
+  const absentLabel = [...new Set(absentHints)].join(' / ');
+  const listing = buildDeterministicListingReply({
+    docs,
+    message: second,
+    kind: 'rank',
+    category: frameCategory,
+    requestedCount: limit,
+    wantsSingle: false,
+    sortBy: secondFilters.sort_by ?? 'price_asc',
+  });
+
+  return {
+    reply: `Hayır — kataloğumuzda ${absentLabel} bulunmamaktadır.\n\n${listing.reply}`,
+    docs,
+    hasProductCards: listing.hasProductCards,
+  };
 }
 
 /**
@@ -3138,6 +3501,16 @@ export async function POST(req: NextRequest) {
       messageFilters.min_price_exclusive = undefined;
     }
 
+    // Adet × fiyat kargo ve "X var mı? Yoksa Y göster" çift isteği — LLM'siz.
+    const shippingCartResult = await resolveShippingQuantityCart(
+      message,
+      supabase,
+      knownCategories
+    );
+    const dualRequestResult = shippingCartResult
+      ? null
+      : await buildAbsentThenFallbackReply(message, supabase, knownCategories);
+
     // Renk dökümü: "hangi renkler var?" → modelin "genellikle çeşitli renkler"
     // gibi geçiştirmesi yerine katalogdaki gerçek renkleri say.
     if (looksLikeColorCatalogQuestion(message)) {
@@ -3259,6 +3632,15 @@ export async function POST(req: NextRequest) {
           rawReply = `${scopeLabel} mevcut profil kalınlıkları: ${listBit}.`;
         }
       }
+    } else if (shippingCartResult) {
+      documents = shippingCartResult.docs;
+      const shippingReply = buildShippingQuantityCartReply(shippingCartResult);
+      rawReply = shippingReply.reply;
+      hasProductCards = shippingReply.hasProductCards;
+    } else if (dualRequestResult) {
+      documents = dualRequestResult.docs;
+      rawReply = dualRequestResult.reply;
+      hasProductCards = dualRequestResult.hasProductCards;
     } else if (acceptAlternateCategory) {
       const altCategory =
         findMentionedCategories(message, knownCategories)[0] ??
@@ -3291,82 +3673,32 @@ export async function POST(req: NextRequest) {
       }
 
       documents = altDocs;
-      const altDerived = buildDerivedPromptFields(documents, true);
-      hasProductCards = altDerived.hasProductCards;
-      const budgetBit =
-        budget != null ? ` ve ${budget} TL altı/eşit` : '';
-      const altGuard =
-        documents.length === 0
-          ? `ALTERNATİF KATEGORİ (KESİN): "${altCategory ?? 'alternatif'}"${budgetBit} ürün YOK. Önceki kaldırım panosu / 5310 TL ürünü GÖSTERME.\n\n`
-          : `ALTERNATİF KATEGORİ (KESİN): "${altCategory}"${budgetBit} ${documents.length} ürün. Hepsi kartlarda. Kaldırım panosu / bütçe üstü ürün GÖSTERME.\n\n`;
-
-      const altCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${altGuard}${altDerived.contextText}`,
-              hasProductCards: altDerived.hasProductCards,
-              isAmbiguousGenericQuery: false,
-              toolActive: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-      rawReply = altCompletion.choices[0].message.content ?? '';
-      if (documents.length === 0) {
-        rawReply = `Üzgünüm, "${altCategory ?? 'bu kategori'}"${
-          budget != null ? ` için ${budget} TL altında` : ''
-        } şu an uygun ürün bulamadım. Bütçeyi yükseltmek veya başka bir filtre denemek ister misiniz?`;
-        hasProductCards = false;
-      } else if (
-        !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER) ||
-        /bulunmamaktadır|ürün yok|bulunamadı/i.test(rawReply)
-      ) {
-        rawReply = `"${altCategory}" kategorisinde${
-          budget != null ? ` ${budget} TL altındaki` : ''
-        } ürünlerimizi aşağıda inceleyebilirsiniz:\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nİlgilendiğiniz bir model var mı?`;
-        hasProductCards = true;
+      {
+        const listing = buildDeterministicListingReply({
+          docs: documents,
+          message,
+          kind: 'alternate',
+          category: altCategory,
+          alternateBudget: budget,
+        });
+        rawReply = listing.reply;
+        hasProductCards = listing.hasProductCards;
+        bypassCardSanitize = listing.bypassCardSanitize;
       }
     } else if (wantsAllCatalogProducts(message)) {
       documents = await executeSearchProducts(supabase, knownCategories, {
         sort_by: 'price_asc',
         limit: 200,
       });
-      const allDerived = buildDerivedPromptFields(documents, true);
-      hasProductCards = allDerived.hasProductCards;
-      const allGuard = `KATALOG LİSTESİ (KESİN): Mağazada toplam ${documents.length} ürün var. Hepsini kartlarda göster; "aşağıda" deyip kart/yer tutucu unutma. Yanlış sayı UYDURMA.\n\n`;
-
-      const allCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${allGuard}${allDerived.contextText}`,
-              hasProductCards: allDerived.hasProductCards,
-              isAmbiguousGenericQuery: false,
-              toolActive: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-      rawReply = allCompletion.choices[0].message.content ?? '';
-      if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
-        rawReply = `Mağazamızdaki ${documents.length} ürünü aşağıda inceleyebilirsiniz:\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nListedeki ürünlerden ilgilendiğiniz bir model var mı?`;
+      {
+        const listing = buildDeterministicListingReply({
+          docs: documents,
+          message,
+          kind: 'all',
+        });
+        rawReply = listing.reply;
+        hasProductCards = listing.hasProductCards;
+        bypassCardSanitize = listing.bypassCardSanitize;
       }
     } else if (looksLikeCatalogCountQuestion(message)) {
       // "27 adet yok mu?" — önceki kategori / mesajdan sayıyı DB'den doğrula
@@ -3379,43 +3711,16 @@ export async function POST(req: NextRequest) {
         ...(countCategory ? { category: countCategory } : {}),
         limit: 200,
       });
-      const countDerived = buildDerivedPromptFields(documents, true);
-      hasProductCards = countDerived.hasProductCards;
-      const scopeLabel = countCategory
-        ? `"${countCategory}" kategorisinde`
-        : 'katalogda';
-      const countGuard = `ÜRÜN SAYISI (KESİN): ${scopeLabel} TAM ${documents.length} ürün var. Kullanıcı farklı bir sayı söylediyse kibarca düzelt; "yalnızca 10" gibi yanlış sayı UYDURMA. Kartları göster.\n\n`;
-
-      const countCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${countGuard}${countDerived.contextText}`,
-              hasProductCards: countDerived.hasProductCards,
-              isAmbiguousGenericQuery: false,
-              toolActive: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-      rawReply = countCompletion.choices[0].message.content ?? '';
-      if (
-        !/\b\d+\b/.test(rawReply) ||
-        !rawReply.includes(String(documents.length))
-      ) {
-        rawReply =
-          `${scopeLabel} toplam ${documents.length} ürün bulunmaktadır. İlgili ürünleri aşağıda görebilirsiniz:\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nListedeki ürünlerden ilgilendiğiniz bir model var mı?`.trim();
-        hasProductCards = documents.length > 0;
-      } else if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
-        rawReply = `${rawReply}\n\n${PRODUCT_CARDS_PLACEHOLDER}`;
+      {
+        const listing = buildDeterministicListingReply({
+          docs: documents,
+          message,
+          kind: 'count',
+          category: countCategory,
+        });
+        rawReply = listing.reply;
+        hasProductCards = listing.hasProductCards;
+        bypassCardSanitize = listing.bypassCardSanitize;
       }
     } else if (messageFilters.out_of_stock_only) {
       const oosCategories = findMentionedCategories(message, knownCategories);
@@ -3438,35 +3743,19 @@ export async function POST(req: NextRequest) {
         return true;
       });
 
-      const oosDerived = buildDerivedPromptFields(documents, true);
-      hasProductCards = oosDerived.hasProductCards;
-      const oosGuard =
-        documents.length > 0
-          ? `ÖNEMLİ (STOK=0 ARAMA SONUCU): Veritabanı stok=0 filtresiyle ${documents.length} ürün buldu. ASLA "stokta olmayan ürün yok/bulunmamaktadır" DEME. Ürünü/kartları göster; stok 0 olduğu için anında sipariş onaylama, "şu an stokta yok" de.\n\n`
-          : 'ÖNEMLİ (STOK=0 ARAMA SONUCU): Bu kritere uyan stok=0 ürün bulunamadı.\n\n';
-
-      const oosCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${oosGuard}${oosDerived.contextText}`,
-              hasProductCards: oosDerived.hasProductCards,
-              isAmbiguousGenericQuery: oosDerived.isAmbiguousGenericQuery,
-              toolActive: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-
-      rawReply = oosCompletion.choices[0].message.content ?? '';
+      {
+        const listing = buildDeterministicListingReply({
+          docs: documents,
+          message,
+          kind: 'oos',
+          category: oosCategories[0] ?? null,
+          wantsSingle,
+          sortBy: messageFilters.sort_by,
+        });
+        rawReply = listing.reply;
+        hasProductCards = listing.hasProductCards;
+        bypassCardSanitize = listing.bypassCardSanitize;
+      }
     } else if (messageFilters.on_discount_only && !looksLikePolicyQuestion(message)) {
       // "İndirimli A1 ... en pahalısı" — tool atlanırsa yanlış/boş cevap üretilmesin
       const discCategories = findMentionedCategories(message, knownCategories);
@@ -3488,59 +3777,20 @@ export async function POST(req: NextRequest) {
         return true;
       });
 
-      const discDerived = buildDerivedPromptFields(documents, true);
-      hasProductCards = discDerived.hasProductCards;
-      const discGuard = emptySearchGuard(documents, {
-        ...messageFilters,
-        on_discount_only: true,
-        category: discCategories[0],
-      });
-      const discDoc = documents[0];
-      const listPrice = discDoc?.metadata?.list_price;
-      const salePrice = discDoc?.metadata?.price;
-      const priceAskGuard =
-        documents.length > 0 &&
-        /(liste\s*fiyat|indirimli\s*fiyat|fiyatı\s*nedir|fiyati\s*nedir)/i.test(message)
-          ? `FİYAT DETAYI (KESİN): ${
-              typeof discDoc?.metadata?.title === 'string' ? discDoc.metadata.title : 'Ürün'
-            } — Liste fiyatı: ${
-              typeof listPrice === 'number' ? `${listPrice} TL` : 'yok'
-            }; İndirimli/satış fiyatı: ${
-              typeof salePrice === 'number' ? `${salePrice} TL` : 'yok'
-            }. Metinde her iki fiyatı da AÇIKÇA yaz (sadece karta bırakma).\n\n`
-          : '';
-
-      const discCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${priceAskGuard}${discGuard}${discDerived.contextText}`,
-              hasProductCards: discDerived.hasProductCards,
-              isAmbiguousGenericQuery: discDerived.isAmbiguousGenericQuery,
-              toolActive: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-
-      rawReply = discCompletion.choices[0].message.content ?? '';
-      // Model bazen fiyatları sadece karta bırakıyor; sorulduysa metne ekle.
-      if (
-        priceAskGuard &&
-        typeof listPrice === 'number' &&
-        typeof salePrice === 'number' &&
-        (!rawReply.includes(String(listPrice)) || !rawReply.includes(String(salePrice)))
-      ) {
-        rawReply =
-          `${rawReply}\n\nListe fiyatı: ${listPrice} TL, indirimli fiyat: ${salePrice} TL.`.trim();
+      {
+        const listing = buildDeterministicListingReply({
+          docs: documents,
+          message,
+          kind: 'discount',
+          category: discCategories[0] ?? null,
+          wantsSingle,
+          sortBy: messageFilters.sort_by,
+          dimension: messageFilters.dimension,
+          color: messageFilters.color,
+        });
+        rawReply = listing.reply;
+        hasProductCards = listing.hasProductCards;
+        bypassCardSanitize = listing.bypassCardSanitize;
       }
     } else if (
       // "En ucuz indirimli çerçeveyi alıp iade edebilir miyim?" — politika + ürün
@@ -3648,9 +3898,8 @@ export async function POST(req: NextRequest) {
         return true;
       });
 
-      // Kırpmadan önceki havuz: "en ağır aynı zamanda en ucuz mu?" gibi
-      // sorularda diğer ucu kesin hesaplamak için gerekiyor.
-      const crossSuperlativeGuard = buildCrossSuperlativeGuard(message, rankDocs);
+      // Kırpmadan önceki havuz: çoklu üstünlük karşılaştırması için
+      const rankPool = [...rankDocs];
 
       if (Number.isFinite(requestedCount) && requestedCount > 0) {
         rankDocs = rankDocs.slice(0, Math.min(requestedCount, 50));
@@ -3674,57 +3923,23 @@ export async function POST(req: NextRequest) {
 
       documents = rankDocs;
 
-      const rankDerived = buildDerivedPromptFields(documents, true);
-      hasProductCards = rankDerived.hasProductCards;
-      const rankGuard = emptySearchGuard(documents, {
-        ...messageFilters,
-        category: rankCategories[0],
-      });
-      const countGuard =
-        Number.isFinite(requestedCount) && requestedCount > 0
-          ? `ÖNEMLİ: Kullanıcı ${requestedCount} ürün istedi; sonuçta ${documents.length} ürün var. Kural 10'a uy.\n\n`
-          : wantsSingle && documents.length > 1
-            ? `ÖNEMLİ: En ucuz/pahalı değerde ${documents.length} ürün BERABERE. "Yalnızca 1 ürün var" DEME; berabere ürünleri belirt.\n\n`
-            : wantsSingle
-              ? 'ÖNEMLİ: Bu, sıralama sonucundaki birincil üründür. Filtreye uyan başka ürün yokmuş gibi "kategoride yalnızca 1 ürün" DEME (bilmiyorsan söyleme).\n\n'
-              : '';
-      const priceStockGuard = wantsInlinePriceStockSummary(message)
-        ? buildProductPriceStockSummary(documents)
-        : '';
-      const colorCompareGuard = buildMultiColorCompareGuard(
-        documents,
-        messageFilters.colors ?? []
-      );
-
-      const rankCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${crossSuperlativeGuard}${countGuard}${colorCompareGuard}${priceStockGuard}${rankGuard}${rankDerived.contextText}`,
-              hasProductCards: rankDerived.hasProductCards,
-              isAmbiguousGenericQuery: rankDerived.isAmbiguousGenericQuery,
-              toolActive: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-
-      rawReply = rankCompletion.choices[0].message.content ?? '';
-      if (priceStockGuard && !/\d+\s*tl/i.test(rawReply)) {
-        const compact = buildProductPriceStockSummary(documents)
-          .replace(/^FİYAT\/STOK ÖZETİ[^\n]*\n/, '')
-          .trim();
-        if (compact) {
-          rawReply = `${rawReply}\n\n${compact}`.trim();
-        }
+      {
+        const listing = buildDeterministicListingReply({
+          docs: documents,
+          message,
+          kind: 'rank',
+          category: rankCategories[0] ?? null,
+          colors: messageFilters.colors,
+          color: messageFilters.color,
+          dimension: messageFilters.dimension,
+          requestedCount: Number.isFinite(requestedCount) ? requestedCount : undefined,
+          wantsSingle,
+          sortBy,
+          rankPool,
+        });
+        rawReply = listing.reply;
+        hasProductCards = listing.hasProductCards;
+        bypassCardSanitize = listing.bypassCardSanitize;
       }
     } else if (
       // "1000 TL altı B2" / "32 mm" / "kırmızı ile siyah A1" — zorunlu filtreli arama
@@ -3808,36 +4023,6 @@ export async function POST(req: NextRequest) {
 
       documents = filterDocs;
 
-      const filterDerived = buildDerivedPromptFields(documents, true);
-      hasProductCards = filterDerived.hasProductCards;
-      const filterGuard = emptySearchGuard(documents, {
-        ...messageFilters,
-        category: filterCategories[0],
-      });
-      const budgetGuard =
-        messageFilters.max_price != null
-          ? documents.length === 0
-            ? `BÜTÇE SONUCU (KESİN): ${filterCategories[0] ? `"${filterCategories[0]}" kategorisinde ` : ''}${messageFilters.max_price} TL ve altı ürün YOK. "Evet var" DEME. 5310 gibi üst fiyatlı ürünü bu bütçeye sokma. Cevaba "Hayır" ile başla; istersen daha yüksek bütçe veya diğer kategoriyi sor.\n\n`
-            : `BÜTÇE SONUCU (KESİN): ${messageFilters.max_price} TL altı/eşit ${documents.length} ürün. Fiyatı ${messageFilters.max_price} TL'yi aşan hiçbir ürünü "uygun" diye sunma.\n\n`
-          : '';
-      const priceStockGuard = wantsInlinePriceStockSummary(message)
-        ? buildProductPriceStockSummary(documents)
-        : '';
-      const colorCompareGuard = buildMultiColorCompareGuard(
-        documents,
-        messageFilters.colors ?? []
-      );
-      const multiGuard =
-        documents.length > 1
-          ? `ÖNEMLİ: Filtreye uyan ${documents.length} ürün var; "yalnızca 1 ürün" DEME.\n\n`
-          : '';
-      const profileHitGuard =
-        messageFilters.profile_thickness_mm != null && documents.length > 0
-          ? `PROFİL SONUCU (KESİN): ${messageFilters.profile_thickness_mm} mm için ${documents.length} ürün BULUNDU. "bulunmamaktadır / yoktur / yok" DEME; ürünü göster, stok 0 ise "(Stokta yok)" yaz.\n\n`
-          : '';
-      // Köşe tipi sorusunda model var olan tipe "mevcut değil" diyebiliyor;
-      // iki tipin gerçek sayısını bağlama koy.
-      let cornerGuard = '';
       let cornerCounts: { gönye: number; rondo: number } | null = null;
       if (messageFilters.corner_type) {
         const scopeDocs = await executeSearchProducts(supabase, knownCategories, {
@@ -3848,94 +4033,27 @@ export async function POST(req: NextRequest) {
           gönye: scopeDocs.filter((doc) => docMatchesCornerType(doc, 'gönye')).length,
           rondo: scopeDocs.filter((doc) => docMatchesCornerType(doc, 'rondo')).length,
         };
-        cornerGuard = `KÖŞE TİPİ (KESİN): Bu aramada "${messageFilters.corner_type} köşe" filtresi uygulandı; kartlardaki ${documents.length} ürünün TAMAMI ${messageFilters.corner_type} köşedir. Aynı kapsamda gönye köşe ${cornerCounts.gönye} ürün, rondo köşe ${cornerCounts.rondo} ürün var. Sayısı sıfır olmayan bir köşe tipi için "yok / mevcut değil / bulamadım" DEME.\n\n`;
       }
 
-      const filterCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${budgetGuard}${cornerGuard}${profileHitGuard}${multiGuard}${colorCompareGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
-              hasProductCards: filterDerived.hasProductCards,
-              isAmbiguousGenericQuery: filterDerived.isAmbiguousGenericQuery,
-              toolActive: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-
-      rawReply = filterCompletion.choices[0].message.content ?? '';
-      // Bütçe + kategori boşsa zorunlu Hayır (model "evet panosu var" + çerçeve kartı uydurmasın)
-      if (
-        messageFilters.max_price != null &&
-        documents.length === 0 &&
-        filterCategories[0]
-      ) {
-        rawReply = `Hayır, "${filterCategories[0]}" kategorisinde ${messageFilters.max_price} TL ve altında ürün bulunmamaktadır. Daha yüksek bir bütçe veya başka bir kategori (ör. afiş çerçevesi) denemek ister misiniz?`;
-        hasProductCards = false;
-      }
-      // Model "gönye köşeli mevcut değil" gibi yanlış bir inkâra giderse
-      // (kartlar dolu olduğu halde) sayıları kendimiz yazıyoruz.
-      if (
-        messageFilters.corner_type &&
-        cornerCounts &&
-        documents.length > 0 &&
-        /(bulunmamaktadır|bulunmuyor|yoktur|mevcut değil|bulamadım|ürün yok)/i.test(rawReply)
-      ) {
-        const corner = messageFilters.corner_type;
-        const scopeLabel = filterCategories[0]
-          ? `"${filterCategories[0]}" kategorisinde`
-          : 'kataloğumuzda';
-        rawReply = `${scopeLabel} gönye köşe ${cornerCounts.gönye} ürün, rondo köşe ${cornerCounts.rondo} ürün bulunuyor. Aşağıdaki kartlarda ${corner} köşeli ${documents.length} ürünü görüyorsunuz.\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nDiğer köşe tipini de listelemek ister misiniz?`;
-      }
-      // Profil filtresi sonuç verdiyse modelin "yok" demesini düzelt
-      if (
-        messageFilters.profile_thickness_mm != null &&
-        documents.length > 0 &&
-        /(bulunmamaktadır|bulunmuyor|yoktur|ürün yok|profil.*yok)/i.test(rawReply)
-      ) {
-        const mm = messageFilters.profile_thickness_mm;
-        const summary = buildProductPriceStockSummary(documents, 5)
-          .replace(/^FİYAT\/STOK ÖZETİ[^\n]*\n/, '')
-          .trim();
-        rawReply =
-          `Evet, ${mm} mm profilli ürünümüz var${documents.some((d) => d.metadata?.stock === 0) ? ' (stok durumu aşağıda)' : ''}:\n\n${summary}\n\n${PRODUCT_CARDS_PLACEHOLDER}`.trim();
-      }
-      // Renk karşılaştırmasında model ya bir rengi atlıyor ya da iç talimat
-      // kalıplarını ("bu filtreyle", "ölçü+renk") kullanıcıya kopyalıyor;
-      // bu durumda cevabı tamamen veriden ürettiğimiz özetle değiştiriyoruz.
-      const requestedColors = messageFilters.colors ?? [];
-      if (colorCompareGuard && requestedColors.length > 1) {
-        const leakedInstruction =
-          /(uydurma|sayısal hesapla|bu filtreyle|ölçü\s*\+\s*renk|ürün YOK)/i.test(rawReply);
-        const productPrices = documents
-          .filter((doc) => doc.metadata?.type === 'product')
-          .map((doc) => doc.metadata?.price)
-          .filter((price): price is number => typeof price === 'number');
-        const allPricesShown =
-          productPrices.length > 0 &&
-          productPrices.every((price) => rawReply.includes(String(price)));
-        const missingColor = requestedColors.some(
-          (color) => !findDocByColor(documents, color)
-        );
-        const deterministicReply = buildColorCompareReply(
-          documents,
-          requestedColors,
+      {
+        const listing = buildDeterministicListingReply({
+          docs: documents,
           message,
-          messageFilters.dimension
-        );
-        if (deterministicReply && (leakedInstruction || !allPricesShown || missingColor)) {
-          rawReply = deterministicReply;
-          bypassCardSanitize = true;
-        }
+          kind: 'filter',
+          category: filterCategories[0] ?? null,
+          maxPrice: messageFilters.max_price,
+          color: messageFilters.color,
+          colors: messageFilters.colors,
+          dimension: messageFilters.dimension,
+          profileMm: messageFilters.profile_thickness_mm,
+          cornerType: messageFilters.corner_type,
+          cornerCounts,
+          wantsSingle: wantsSingleFilter,
+          sortBy: messageFilters.sort_by,
+        });
+        rawReply = listing.reply;
+        hasProductCards = listing.hasProductCards;
+        bypassCardSanitize = listing.bypassCardSanitize;
       }
     } else if (directCategoryMatches.length > 0) {
       const categoryResultDocs: MatchedDocument[] = [];
@@ -3970,41 +4088,23 @@ export async function POST(req: NextRequest) {
         return true;
       });
 
-      const categoryDerived = buildDerivedPromptFields(documents, true);
-      hasProductCards = categoryDerived.hasProductCards;
-      const categoryGuard = emptySearchGuard(documents, {
-        ...messageFilters,
-        category: directCategoryMatches.join(' | '),
-      });
-      const countGuard =
-        documents.length > 0
-          ? `KATEGORİ LİSTESİ (KESİN): "${directCategoryMatches.join(' / ')}" için TAM ${documents.length} ürün var; hepsi kartlarda. Cevapta bu sayıyı kullan. "10 ürün / birkaç ürün" diye eksik sayı UYDURMA.\n\n`
-          : '';
-
-      const categoryCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${countGuard}${categoryGuard}${categoryDerived.contextText}`,
-              hasProductCards: categoryDerived.hasProductCards,
-              isAmbiguousGenericQuery: categoryDerived.isAmbiguousGenericQuery,
-              toolActive: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-
-      rawReply = categoryCompletion.choices[0].message.content ?? '';
-      if (hasProductCards && !rawReply.includes(PRODUCT_CARDS_PLACEHOLDER)) {
-        rawReply = `${rawReply}\n\n${PRODUCT_CARDS_PLACEHOLDER}`;
+      {
+        const listing = buildDeterministicListingReply({
+          docs: documents,
+          message,
+          kind: 'category',
+          categories: directCategoryMatches,
+          category: directCategoryMatches[0] ?? null,
+          color: messageFilters.color,
+          colors: messageFilters.colors,
+          dimension: messageFilters.dimension,
+          maxPrice: messageFilters.max_price,
+          profileMm: messageFilters.profile_thickness_mm,
+          cornerType: messageFilters.corner_type,
+        });
+        rawReply = listing.reply;
+        hasProductCards = listing.hasProductCards;
+        bypassCardSanitize = listing.bypassCardSanitize;
       }
     } else {
       // 2. Fallback: politika / belirsiz / tool yolu. Baseline vektör
@@ -4165,41 +4265,24 @@ export async function POST(req: NextRequest) {
           return true;
         });
 
-        const toolDerived = buildDerivedPromptFields(documents, true);
-        hasProductCards = toolDerived.hasProductCards;
-        const toolGuard = emptySearchGuard(documents, messageFilters);
-
-        // 4. İkinci model çağrısı: model artık search_products sonuçlarına
-        // (tool mesajları + güncellenmiş sistem prompt'u) sahip; sadece
-        // sonucu kurallara uygun şekilde sunması gerekiyor.
-        const secondCompletion = await openai.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [
-            {
-              role: 'system',
-              content: buildSystemPrompt({
-                knownCategoriesText,
-                contextText: `${toolGuard}${toolDerived.contextText}`,
-                hasProductCards: toolDerived.hasProductCards,
-                isAmbiguousGenericQuery: toolDerived.isAmbiguousGenericQuery,
-                toolActive: true,
-                userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-              }),
-            },
-            ...historyMessages,
-            { role: 'user', content: message },
-            {
-              role: 'assistant',
-              content: firstMessage.content,
-              tool_calls: toolCalls,
-            },
-            ...toolResponseMessages,
-          ],
-          temperature: 0.2,
+        // Tool sonucu DB'den geldi; ikinci LLM çağrısı yok — facts'ten yaz.
+        const listing = buildDeterministicListingReply({
+          docs: documents,
+          message,
+          kind: 'tool',
+          category: messageFilters.category ?? null,
+          maxPrice: messageFilters.max_price,
+          color: messageFilters.color,
+          colors: messageFilters.colors,
+          dimension: messageFilters.dimension,
+          profileMm: messageFilters.profile_thickness_mm,
+          cornerType: messageFilters.corner_type,
+          wantsSingle: looksLikeRankingOrSingleItemQuestion(message),
+          sortBy: messageFilters.sort_by,
         });
-
-        rawReply = secondCompletion.choices[0].message.content ?? '';
+        rawReply = listing.reply;
+        hasProductCards = listing.hasProductCards;
+        bypassCardSanitize = listing.bypassCardSanitize;
       } else {
         // Tool çağrılmadı: bu mesajda kesinlikle kart gösterilmeyecek,
         // `documents` baseline (vektör arama) sonuçlarında kalır (sadece
