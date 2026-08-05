@@ -147,6 +147,42 @@ const CASES = [
     mustNotInclude: [/evet[,.].{0,30}50\s*adet|50 adet sipariş verebilirsiniz/i],
   },
   {
+    name: '18 tane alabilir miyim → stok (18 TL sanma)',
+    history: [
+      {
+        role: 'user',
+        content:
+          'Alüminyum Açılır Kapanır Çerçeve - A4 - 21x30 cm - Kırmızı - 25mm Gönye Köşe',
+      },
+      {
+        role: 'assistant',
+        content:
+          'Alüminyum Açılır Kapanır Çerçeve - A4 - 21x30 cm - Kırmızı - 25mm Gönye Köşe hakkında bilgi: satış 465 TL, stok 16.',
+      },
+    ],
+    q: 'şuan bu üründen 18 tane alabilir miyim',
+    mustInclude: [/hay[ıi]r|16|stok/i],
+    mustNotInclude: [/18\s*TL|elinizdeki 18|fark 447/i],
+  },
+  {
+    name: '18 adet kargo → kilitli ürün 465 TL (420 sanma)',
+    history: [
+      {
+        role: 'user',
+        content:
+          'Alüminyum Açılır Kapanır Çerçeve - A4 - 21x30 cm - Kırmızı - 25mm Gönye Köşe',
+      },
+      {
+        role: 'assistant',
+        content:
+          'Alüminyum Açılır Kapanır Çerçeve - A4 - 21x30 cm - Kırmızı - 25mm Gönye Köşe: satış 465 TL, stok 16.',
+      },
+    ],
+    q: 'bu üründen 18 adet kargolar mısınız',
+    mustInclude: [/hay[ıi]r|16|stok/i],
+    mustNotInclude: [/420|7560|18\s*TL/i],
+  },
+  {
     name: 'Kategori browse: 27 kart (citation cap tuzağı)',
     q: 'afiş çerçevesi',
     mustInclude: [/\[\[URUN_KARTLARI\]\]/i],

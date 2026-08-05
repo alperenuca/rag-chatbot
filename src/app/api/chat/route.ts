@@ -786,9 +786,27 @@ function collectColorsFromDocs(
   );
 }
 
+/** "18 tane / 18 adet alabilir miyim?" — miktar; bütçe (TL) değil */
+function extractRequestedPurchaseQty(message: string): number | null {
+  const match = message.match(/(\d+)\s*(?:adet|tane|parça)\b/i);
+  if (!match?.[1]) return null;
+  const qty = Number(match[1]);
+  if (!Number.isFinite(qty) || qty <= 0 || qty > 500) return null;
+  return qty;
+}
+
+function looksLikeQuantityPurchaseQuestion(message: string): boolean {
+  return (
+    extractRequestedPurchaseQty(message) != null &&
+    /(alabilir|almak|sipariş|satın|kargo|kargola|gönder|isterim)/i.test(message)
+  );
+}
+
 /** "5311 TL elimde var, bu ürünü alabilir miyim?" — katalog bütçe filtresi değil */
 function looksLikeAffordabilityQuestion(message: string): boolean {
   const t = message.toLocaleLowerCase('tr-TR');
+  // "18 tane alabilir miyim" → stok/adet; asla bütçe sanma
+  if (looksLikeQuantityPurchaseQuestion(message)) return false;
   if (/(neden\s*alamam|neden\s*alamıyorum|neden\s*olmaz|neden\s*alamaz)/i.test(t)) {
     return true;
   }
@@ -798,8 +816,9 @@ function looksLikeAffordabilityQuestion(message: string): boolean {
   ) {
     return true;
   }
+  // Para birimi zorunlu — çıplak "18 alabilir miyim" bütçe değildir
   if (
-    /\d+(?:[.,]\d+)?\s*(?:tl|₺|lira)?/.test(t) &&
+    /\d+(?:[.,]\d+)?\s*(?:tl|₺|lira)\b/.test(t) &&
     /(bu\s+ürünü?\s*)?(alabilir\s*miyim|almak\s*ister|ile\s*al)/i.test(t)
   ) {
     return true;
@@ -808,13 +827,13 @@ function looksLikeAffordabilityQuestion(message: string): boolean {
 }
 
 function extractAffordabilityAmount(message: string): number | null {
+  if (looksLikeQuantityPurchaseQuestion(message)) return null;
   const t = message.toLocaleLowerCase('tr-TR');
   const patterns = [
     /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:elimde|bende)/i,
     /(?:elimde|bende|cüzdanımda)\s*(\d+(?:[.,]\d+)?)/i,
     /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira)?\s*[ey]'?(?:ye|e)?\s*neden\s*alam/i,
     /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)\b/i,
-    /\b(\d+(?:[.,]\d+)?)\b/,
   ];
   for (const pattern of patterns) {
     const match = t.match(pattern);
@@ -852,6 +871,53 @@ function buildAffordabilityReply(
 
   const gap = Math.round((price - amount) * 100) / 100;
   return `Hayır — "${title}" satış fiyatı ${price} TL. Elinizdeki ${amount} TL yetersiz (fark ${gap} TL).`;
+}
+
+/** Kilitli ürün için "N adet/tane alabilir miyim?" → stok karşılaştırması */
+function buildStockQuantityReply(qty: number, product: MatchedDocument): string {
+  const title =
+    typeof product.metadata?.title === 'string' && product.metadata.title.trim()
+      ? product.metadata.title.trim()
+      : 'Bu ürün';
+  const stock = product.metadata?.stock;
+  if (typeof stock !== 'number' || !Number.isFinite(stock)) {
+    return `"${title}" için stok bilgisini doğrulayamadım; teyit için iletişime geçebilirsiniz.`;
+  }
+  if (stock <= 0) {
+    return `Hayır — "${title}" şu an stokta yok; ${qty} adet gönderemiyoruz.`;
+  }
+  if (stock < qty) {
+    return `Hayır — "${title}" için stokta yalnızca ${stock} adet var; ${qty} adet için stok yetersiz.`;
+  }
+  return `Evet — "${title}" için stokta ${stock} adet var; ${qty} adet sipariş verebilirsiniz.`;
+}
+
+/** Kilitli ürün + "N adet kargolar mısınız / kargo ücretsiz mi?" */
+function buildPinnedShippingQuantityReply(
+  message: string,
+  product: MatchedDocument
+): string | null {
+  if (!/(kargo|ücretsiz|kargola)/i.test(message)) return null;
+  const qty = extractRequestedPurchaseQty(message);
+  if (qty == null) return null;
+  const unit = product.metadata?.price;
+  const title =
+    typeof product.metadata?.title === 'string' && product.metadata.title.trim()
+      ? product.metadata.title.trim()
+      : 'Bu ürün';
+  if (typeof unit !== 'number' || !Number.isFinite(unit) || unit <= 0) return null;
+
+  const stock = product.metadata?.stock;
+  if (typeof stock === 'number' && stock < qty) {
+    return `Hayır — "${title}" için stokta yalnızca ${stock} adet var; ${qty} adet kargolayamayız.`;
+  }
+
+  const total = Math.round(unit * qty * 100) / 100;
+  const free = total >= FREE_SHIPPING_THRESHOLD_TL;
+  if (free) {
+    return `Evet — "${title}" birim ${unit} TL × ${qty} adet = ${total} TL; ücretsiz kargo eşiği ${FREE_SHIPPING_THRESHOLD_TL} TL olduğu için kargo ücretsiz olur.`;
+  }
+  return `Hayır — "${title}" birim ${unit} TL × ${qty} adet = ${total} TL; ücretsiz kargo için ${FREE_SHIPPING_THRESHOLD_TL} TL eşiğinin altında. Kargo ücretli olabilir.`;
 }
 
 /**
@@ -1329,9 +1395,8 @@ function buildDeterministicListingReply(opts: DeterministicListingOptions): {
     summary = `Evet, kriterinize uyan ${count} ürün aşağıdadır.`;
   }
 
-  // "50 adet almak istiyorum" → stok yetersizse onaylama
-  const wantQty = opts.message.match(/(\d+)\s*adet/i);
-  const askedQty = wantQty?.[1] ? Number(wantQty[1]) : null;
+  // "50 adet / 18 tane almak istiyorum" → stok yetersizse onaylama
+  const askedQty = extractRequestedPurchaseQty(opts.message);
   if (
     askedQty != null &&
     Number.isFinite(askedQty) &&
@@ -2029,13 +2094,10 @@ async function resolveShippingQuantityCart(
 } | null> {
   if (!/(kargo|ücretsiz)/i.test(message)) return null;
   if (looksLikePartialReturnShippingDispute(message)) return null;
-  const qtyMatch = message.match(/(\d+)\s*adet/i);
-  if (!qtyMatch?.[1]) return null;
+  const qty = extractRequestedPurchaseQty(message);
+  if (qty == null) return null;
   // Açık TL tutarı varsa miktar×fiyat hesabına gerek yok
   if (extractExplicitCartAmountTl(message) != null) return null;
-
-  const qty = Number(qtyMatch[1]);
-  if (!Number.isFinite(qty) || qty <= 0 || qty > 500) return null;
 
   const filters = extractSearchFiltersFromMessage(message);
   const categories = findMentionedCategories(message, knownCategories);
@@ -3411,17 +3473,43 @@ export async function POST(req: NextRequest) {
       const productDocs = documents.filter((doc) => doc.metadata?.type === 'product');
       hasProductCards = wantsCardWithDetail && productDocs.length > 0;
 
-      // "5311 TL elimde var alabilir miyim?" → fiyat ile karşılaştır; model "sabit fiyat" uydurmasın
+      const pinnedProduct = productDocs[0];
+
+      // "18 tane/adet alabilir miyim?" → stok; "18 TL" sanma
+      const askedQty = extractRequestedPurchaseQty(message);
+      const stockQtyReply =
+        askedQty != null &&
+        pinnedProduct &&
+        /(alabilir|almak|sipariş|satın|isterim)/i.test(message) &&
+        !/(kargo|ücretsiz|kargola)/i.test(message)
+          ? buildStockQuantityReply(askedQty, pinnedProduct)
+          : null;
+
+      // "bu üründen 18 adet kargolar mısınız?" → kilitli ürün fiyatı × adet
+      const pinnedShipReply =
+        pinnedProduct && !stockQtyReply
+          ? buildPinnedShippingQuantityReply(message, pinnedProduct)
+          : null;
+
+      // "5311 TL elimde var alabilir miyim?" → fiyat ile karşılaştır
       const affordAmount =
+        !stockQtyReply &&
+        !pinnedShipReply &&
         looksLikeAffordabilityQuestion(message)
           ? extractAffordabilityAmount(message)
           : null;
       const affordReply =
-        affordAmount != null && productDocs[0]
-          ? buildAffordabilityReply(affordAmount, productDocs[0])
+        affordAmount != null && pinnedProduct
+          ? buildAffordabilityReply(affordAmount, pinnedProduct)
           : null;
 
-      if (affordReply) {
+      if (stockQtyReply) {
+        rawReply = stockQtyReply;
+        hasProductCards = false;
+      } else if (pinnedShipReply) {
+        rawReply = pinnedShipReply;
+        hasProductCards = false;
+      } else if (affordReply) {
         rawReply = affordReply;
         hasProductCards = false;
       } else {
