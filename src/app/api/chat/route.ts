@@ -977,6 +977,62 @@ function wantsInlinePriceStockSummary(message: string): boolean {
   return asksFact && asksWrite;
 }
 
+type SuperlativeKind = 'cheapest' | 'priciest' | 'heaviest' | 'lightest';
+
+const SUPERLATIVE_PATTERNS: { kind: SuperlativeKind; label: string; pattern: RegExp }[] = [
+  { kind: 'cheapest', label: 'en ucuz', pattern: /en ucuz/i },
+  { kind: 'priciest', label: 'en pahalı', pattern: /en pahalı|en pahali/i },
+  { kind: 'heaviest', label: 'en ağır', pattern: /en ağır|en agir/i },
+  { kind: 'lightest', label: 'en hafif', pattern: /en hafif/i },
+];
+
+function findSuperlativeDoc(
+  docs: MatchedDocument[],
+  kind: SuperlativeKind
+): { doc: MatchedDocument; value: number } | null {
+  const byPrice = kind === 'cheapest' || kind === 'priciest';
+  const entries = docs
+    .map((doc) => ({
+      doc,
+      value: byPrice ? doc.metadata?.price : doc.metadata?.weight_kg,
+    }))
+    .filter((entry): entry is { doc: MatchedDocument; value: number } => typeof entry.value === 'number');
+  if (entries.length === 0) return null;
+  const wantsMax = kind === 'priciest' || kind === 'heaviest';
+  return entries.reduce((best, entry) =>
+    (wantsMax ? entry.value > best.value : entry.value < best.value) ? entry : best
+  );
+}
+
+/**
+ * "En ağır çerçeve aynı zamanda en ucuz mu?" gibi iki üstünlük içeren sorularda
+ * bağlamda tek ürün kaldığı için model diğer ucu uyduruyordu; iki ucu da yazar.
+ */
+function buildCrossSuperlativeGuard(message: string, docs: MatchedDocument[]): string {
+  const asked = SUPERLATIVE_PATTERNS.filter((entry) => entry.pattern.test(message));
+  if (asked.length < 2) return '';
+  const products = docs.filter((doc) => doc.metadata?.type === 'product');
+  if (products.length === 0) return '';
+
+  const lines: string[] = [];
+  const titles: string[] = [];
+  for (const { kind, label } of asked) {
+    const best = findSuperlativeDoc(products, kind);
+    if (!best) continue;
+    const title = typeof best.doc.metadata?.title === 'string' ? best.doc.metadata.title : 'Ürün';
+    const unit = kind === 'cheapest' || kind === 'priciest' ? 'TL' : 'kg';
+    lines.push(`- ${label}: ${title} — ${best.value} ${unit}`);
+    titles.push(title);
+  }
+  if (lines.length < 2) return '';
+
+  const sameProduct = titles.every((title) => title === titles[0]);
+  const verdict = sameProduct
+    ? 'Bu iki uç AYNI ürün → soruya "Evet, aynı ürün" diye cevap verebilirsin.'
+    : 'Bu iki uç FARKLI ürünler → soruya "Hayır" ile başla. "Aynı ürün", "aynı fiyata sahip", "hem en ağır hem en ucuz" gibi ifadeleri KULLANMA; her ucu kendi ürünü ve değeriyle ayrı yaz.';
+  return `ÇOKLU ÜSTÜNLÜK KARŞILAŞTIRMASI (KESİN — katalogdaki gerçek uçlar):\n${lines.join('\n')}\n${verdict}\n\n`;
+}
+
 /** İki+ renk karşılaştırması için bağlama zorunlu fiyat özeti. */
 function buildMultiColorCompareGuard(
   docs: MatchedDocument[],
@@ -2522,8 +2578,20 @@ export async function POST(req: NextRequest) {
       // listesi tekrar tekrar belirebiliyordu.
       const hasProductCards = toolActive && productDocuments.length > 0;
 
+      // Sonuçtaki her ürün stok 0 ise model bunu atlayıp "inceleyebilirsiniz"
+      // deyip geçebiliyordu; kullanıcı ancak kartta fark ediyordu.
+      const allResultsOutOfStock =
+        toolActive &&
+        productDocuments.length > 0 &&
+        productDocuments.every((doc) => doc.metadata?.stock === 0);
+      const outOfStockHint = allResultsOutOfStock
+        ? `ÖNEMLİ (STOK DURUMU — KESİN): Bu sonuçtaki ${
+            productDocuments.length === 1 ? 'ürünün' : 'ürünlerin tamamının'
+          } stok adedi 0. Kısa özet cümlende bunu AÇIKÇA belirt ("şu an stokta yok"); ürünü stoktaymış gibi "hemen satın alabilirsiniz" DEME. Kartları yine göster; stok/alternatif için iletişime veya diğer modellere yönlendir.\n\n`
+        : '';
+
       const hasRelevantContext = docs.length > 0;
-      const contextText = hasRelevantContext
+      const contextBody = hasRelevantContext
         ? docs
             .map((doc) => {
               // Metadata alanlarını (ağırlık, liste/indirimli fiyat, URL) modelin
@@ -2570,6 +2638,7 @@ export async function POST(req: NextRequest) {
         : toolActive
           ? 'ARAMA SONUCU: search_products aracı, belirtilen kritere (kategori/fiyat/stok) uyan hiçbir ürün bulamadı.'
           : 'BAĞLAMDA HİÇBİR İLGİLİ ÜRÜN BULUNAMADI. Kataloğumuzda bu isteğe uyan bir ürün yok.';
+      const contextText = `${outOfStockHint}${contextBody}`;
 
       return { isAmbiguousGenericQuery, hasProductCards, contextText };
     };
@@ -3179,6 +3248,10 @@ export async function POST(req: NextRequest) {
         return true;
       });
 
+      // Kırpmadan önceki havuz: "en ağır aynı zamanda en ucuz mu?" gibi
+      // sorularda diğer ucu kesin hesaplamak için gerekiyor.
+      const crossSuperlativeGuard = buildCrossSuperlativeGuard(message, rankDocs);
+
       if (Number.isFinite(requestedCount) && requestedCount > 0) {
         rankDocs = rankDocs.slice(0, Math.min(requestedCount, 50));
       } else if (wantsSingle) {
@@ -3230,7 +3303,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: `${countGuard}${colorCompareGuard}${priceStockGuard}${rankGuard}${rankDerived.contextText}`,
+              contextText: `${crossSuperlativeGuard}${countGuard}${colorCompareGuard}${priceStockGuard}${rankGuard}${rankDerived.contextText}`,
               hasProductCards: rankDerived.hasProductCards,
               isAmbiguousGenericQuery: rankDerived.isAmbiguousGenericQuery,
               toolActive: true,
@@ -3715,6 +3788,26 @@ export async function POST(req: NextRequest) {
     let reply = hasProductCards
       ? sanitizeProductCardReply(replyWithPlaceholder, allowPriceStockSummary)
       : replyWithPlaceholder;
+
+    // Sonuçtaki ürünlerin tamamı stok 0 iken model bunu söylemezse kullanıcı
+    // durumu ancak kartta fark ediyor; cümleyi deterministik olarak ekliyoruz.
+    const productResultDocs = documents.filter((doc) => doc.metadata?.type === 'product');
+    if (
+      hasProductCards &&
+      productResultDocs.length > 0 &&
+      productResultDocs.every((doc) => doc.metadata?.stock === 0) &&
+      !/(stokta yok|stokta değil|stokta olmayan|stok\s*[:=]?\s*0|tükendi|tükenmiş|stok durumu)/i.test(
+        reply
+      )
+    ) {
+      const stockNote =
+        productResultDocs.length === 1
+          ? 'Not: Bu ürün şu an stokta yok; stok bilgisi veya alternatif için bize yazabilirsiniz.'
+          : 'Not: Bu ürünlerin tamamı şu an stokta yok; stok bilgisi veya alternatif için bize yazabilirsiniz.';
+      reply = reply.includes(PRODUCT_CARDS_PLACEHOLDER)
+        ? reply.replace(PRODUCT_CARDS_PLACEHOLDER, `${stockNote}\n\n${PRODUCT_CARDS_PLACEHOLDER}`)
+        : `${reply}\n\n${stockNote}`;
+    }
 
     // "11 gün sonra iade" → model bazen 11'i 14'ten büyük sanıyor; zorla düzelt
     const returnDayAsked = extractReturnDayOffset(message);

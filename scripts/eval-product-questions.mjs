@@ -339,7 +339,17 @@ function scoreReply(reply, testCase, sources) {
   return fails;
 }
 
+// Tek bir vakayı hızlı yeniden çalıştırmak için: node scripts/... "stok 0"
+const onlyPattern = process.argv.slice(2).find((arg) => !arg.startsWith('-')) || process.env.EVAL_ONLY || '';
+const SELECTED = onlyPattern
+  ? CASES.filter((testCase) => new RegExp(onlyPattern, 'i').test(testCase.name))
+  : CASES;
+
 async function main() {
+  if (SELECTED.length === 0) {
+    console.error(`"${onlyPattern}" ile eşleşen vaka yok.`);
+    process.exit(1);
+  }
   const created = await adminFetch('/admin/users', {
     method: 'POST',
     body: JSON.stringify({ email, password, email_confirm: true }),
@@ -365,9 +375,9 @@ async function main() {
     }
     const cookie = cookieHeader(session);
 
-    for (let i = 0; i < CASES.length; i++) {
-      const testCase = CASES[i];
-      console.log(`\n========== ${i + 1}/${CASES.length} ${testCase.name} ==========`);
+    for (let i = 0; i < SELECTED.length; i++) {
+      const testCase = SELECTED[i];
+      console.log(`\n========== ${i + 1}/${SELECTED.length} ${testCase.name} ==========`);
       const res = await fetch(`${base}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: cookie },
@@ -401,7 +411,7 @@ async function main() {
       await new Promise((r) => setTimeout(r, 800));
     }
 
-    console.log(`\n===== ÖZET: ${passed}/${CASES.length} PASS =====`);
+    console.log(`\n===== ÖZET: ${passed}/${SELECTED.length} PASS =====`);
     if (failures.length) {
       console.log('\n===== FAIL DETAY =====');
       for (const f of failures) {
@@ -409,9 +419,9 @@ async function main() {
       }
     }
     if (process.env.EVAL_JSON === '1') {
-      console.log('\n__EVAL_JSON__' + JSON.stringify({ passed, total: CASES.length, failures }));
+      console.log('\n__EVAL_JSON__' + JSON.stringify({ passed, total: SELECTED.length, failures }));
     }
-    if (passed < CASES.length) process.exitCode = 1;
+    if (passed < SELECTED.length) process.exitCode = 1;
   } finally {
     await adminFetch(`/admin/users/${userId}`, { method: 'DELETE' });
   }
