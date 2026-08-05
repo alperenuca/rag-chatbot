@@ -1258,6 +1258,35 @@ function extractColorsFromMessage(text: string): string[] {
 }
 
 const FREE_SHIPPING_THRESHOLD_TL = 750;
+/** Teslimattan sonra standart iade penceresi (politikalar.md §3.1) */
+const RETURN_WINDOW_DAYS = 14;
+
+/** "11 gün sonrasında iade" / "15. günde" → gün sayısı */
+function extractReturnDayOffset(message: string): number | null {
+  const t = message.toLocaleLowerCase('tr-TR');
+  if (!/(iade|cayma|geri\s*ver)/i.test(t)) return null;
+  const patterns = [
+    /(\d+)\s*gün\s*(?:sonra(?:sında)?|geçtikten(?:\s*sonra)?|geçince)/i,
+    /(\d+)\s*\.\s*gün(?:ünde|unde)?/i,
+    /(?:teslim(?:den|attan)?|aldıktan\s*sonra)\s*(\d+)\s*gün/i,
+    /(\d+)\s*gün\s*(?:içinde|içerisinde)\s*iade/i,
+  ];
+  for (const pattern of patterns) {
+    const match = t.match(pattern);
+    if (match?.[1]) {
+      const day = Number(match[1]);
+      if (Number.isFinite(day) && day > 0 && day <= 365) return day;
+    }
+  }
+  return null;
+}
+
+function buildReturnDayWindowReply(day: number): string {
+  if (day <= RETURN_WINDOW_DAYS) {
+    return `Evet — teslimattan sonra ${day}. günde iade talebi, ${RETURN_WINDOW_DAYS} günlük iade süresi içindedir (${day} ≤ ${RETURN_WINDOW_DAYS}). Ürünün kullanılmamış, etiketli ve orijinal ambalajında olması gerekir; talebi iletisim@ores.com.tr üzerinden oluşturabilirsiniz. İndirimli/kampanyalı ürünler bu genel kuralın dışındadır (iade edilemez).`;
+  }
+  return `Hayır — standart iade süresi teslimattan sonra ${RETURN_WINDOW_DAYS} gündür. ${day}. gün bu sürenin dışındadır (${day} > ${RETURN_WINDOW_DAYS}). Özel durumlar için iletisim@ores.com.tr veya +90 264 531 00 10–11 (08:00–18:00) ile iletişime geçebilirsiniz.`;
+}
 
 function wantsOutOfStockProducts(message: string): boolean {
   return /(stokta olmayan|stokta olmayanlar|stokta yok|stoksuz|stok dışı|stokta bulunmayan|tükenen|bitmiş stok)/i.test(
@@ -1592,6 +1621,19 @@ function returnPolicyHint(message: string): string {
     lines.push(
       'BU SORU İNDİRİMLİ ÜRÜN İADESİ: Cevaba "Hayır" ile başla. İndirimdeki ürün iade edilemez. "14 gün içinde iade edebilirsiniz" DEME — bu genel kural indirimli ürüne uygulanmaz.'
     );
+  }
+
+  const returnDay = extractReturnDayOffset(message);
+  if (returnDay != null && !/(indirim|kampanya)/i.test(text)) {
+    if (returnDay <= RETURN_WINDOW_DAYS) {
+      lines.push(
+        `İADE GÜN KARŞILAŞTIRMASI (KESİN): Kullanıcı ${returnDay}. gün / ${returnDay} gün sonra diyor. ${returnDay} ≤ ${RETURN_WINDOW_DAYS} → süre İÇİNDE. "mümkün değil / maalesef olmaz" DEME. Cevaba "Evet" ile başla; ${RETURN_WINDOW_DAYS} gün kuralını ve kullanılmamış/ambalaj koşullarını söyle.`
+      );
+    } else {
+      lines.push(
+        `İADE GÜN KARŞILAŞTIRMASI (KESİN): ${returnDay} > ${RETURN_WINDOW_DAYS} → süre DIŞINDA. Cevaba "Hayır" ile başla; süre ${RETURN_WINDOW_DAYS} gündür de.`
+      );
+    }
   }
 
   if (
@@ -2148,6 +2190,7 @@ FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
 8. HİÇBİR ÜRÜNÜ ATLAMA: Kullanıcı bir kategorideki/kritere uyan ürünleri sorduğunda, sonuçta kaç ürün varsa (5, 10, 27 fark etmez) TÜMÜ otomatik olarak kartlarda gösterilir; giriş cümlende "birkaç örnek" gibi ifadelerle sayıyı azaltıyormuş gibi konuşma, TÜM sonuçlardan bahset.
 9. SAYISAL/FİYAT/KARGO KARŞILAŞTIRMALARINDA TUTARLILIK (ÇOK ÖNEMLİ): Kullanıcı bir tutarın eşik altında/üstünde olup olmadığını sorduğunda ÖNCE aritmetik yap, SONRA cevapla. "Evet"/"Hayır" ile açıklama ASLA çelişmesin.
    KARGO ÖRNEĞİ: Ücretsiz kargo eşiği 750 TL. 720 TL → Hayır, ücretsiz değil (720 < 750). 800 TL → Evet, ücretsiz (800 ≥ 750). Bağlamda "KARGO ÜCRETSİZ EŞİĞİ" ipucu varsa ona uy.
+   İADE GÜN ÖRNEĞİ: İade süresi teslimattan sonra 14 gün. "11 gün sonrasında iade" → 11 ≤ 14 → EVET (mümkün; koşullar sağlanmalı). "15 gün sonra" → 15 > 14 → HAYIR. 11 için "mümkün değil" deyip sonra "süre 14 gün" demek ÇELİŞKİ — YASAK.
    KISMİ İADE + GİDEN KARGO: "2 ürün aldım, birini iade ettim, ücretsiz kargoyu iademden kesiyorlar" → Sipariş anı eşiğini kısaca söyle; giden kargonun iade tutarından düşülmesi belgede ayrıca yok → kesin kesilir/kesilmez DEME; iletişime yönlendir. "Yasal mı?" için hukuk hükmü verme. Bağlamda "KISMİ İADE + GİDEN KARGO" ipucu varsa ona uy; "KARGO ÜCRETSİZ EŞİĞİ → ÜCRETSİZ" ipucunu bu senaryoya uygulama.
    BÜTÇE / "ELİMDE X TL VAR" (ÇOK ÖNEMLİ): Kullanıcı belirli bir ürün için "elimde 5311 TL var, alabilir miyim?" / "5311'e neden alamam?" derse: X ≥ satış fiyatı → EVET (ödeme sabit fiyattan alınır; fazla para sorun değil). X < fiyat → HAYIR + farkı söyle. 5311 > 5310 iken "Hayır alamazsınız" / "5311 alt teklif" / "sabit fiyat yüzünden 5311 kabul edilmez" DEME. "X TL altı ürün var mı?" katalog filtresidir; "elimde X var bu ürünü alayım mı?" yeterlilik sorusudur — karıştırma.
 10. SAYISAL YANIT HASSASİYETİ (İSTENEN ADET vs GERÇEK SONUÇ — ÇOK ÖNEMLİ): Kullanıcı belirli bir sayıda ürün istediğinde (örn. "en ucuz 3 ürün", "en pahalı 5 çerçeve") ve search_products / bağlam sonucunda istenenden DAHA AZ ürün döndüğünde, bunu ASLA gizleme veya yumuşatma. Metin yanıtında veritabanında/sonuçta TOPLAM kaç ürün bulunduğunu AÇIKÇA belirt. Belirsiz/yanıltıcı ifadeler YASAK:
@@ -3527,6 +3570,25 @@ export async function POST(req: NextRequest) {
     let reply = hasProductCards
       ? sanitizeProductCardReply(replyWithPlaceholder, allowPriceStockSummary)
       : replyWithPlaceholder;
+
+    // "11 gün sonra iade" → model bazen 11'i 14'ten büyük sanıyor; zorla düzelt
+    const returnDayAsked = extractReturnDayOffset(message);
+    if (
+      returnDayAsked != null &&
+      !/(indirim|kampanya)/i.test(message) &&
+      !looksLikeUrgentOrderChange(message)
+    ) {
+      const startsEvet = /^evet\b/i.test(reply.trim());
+      const startsHayir = /^hayır\b|^hayir\b/i.test(reply.trim());
+      const wronglyDenied =
+        returnDayAsked <= RETURN_WINDOW_DAYS && (startsHayir || !startsEvet);
+      const wronglyAllowed =
+        returnDayAsked > RETURN_WINDOW_DAYS && startsEvet;
+      if (wronglyDenied || wronglyAllowed) {
+        reply = buildReturnDayWindowReply(returnDayAsked);
+        hasProductCards = false;
+      }
+    }
 
     if (
       hasProductCards &&
