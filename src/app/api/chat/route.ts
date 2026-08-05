@@ -1021,10 +1021,17 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
   const text = message.toLocaleLowerCase('tr-TR');
   const filters: Partial<SearchProductsArgs> = {};
 
+  // Para birimi + isteğe bağlı genitif: "500 TL", "500 lira", "500 liranın", "500'ün"
+  const moneyUnit =
+    '(?:(?:tl|₺|lira|try)(?:[\'’]?n[ıi]n)?|[\'’]?[üu]n)?';
+
   // "5311 elimde var alabilir miyim?" → max_price DEĞİL (yeterlilik sorusu)
   const affordabilityNotBudget =
     looksLikeAffordabilityQuestion(message) &&
-    !/(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:altı|altında|kadar)/i.test(text) &&
+    !new RegExp(
+      `(\\d+(?:[.,]\\d+)?)\\s*${moneyUnit}\\s*(?:altı|altında|kadar)`,
+      'i'
+    ).test(text) &&
     !/(en fazla|maksimum|max\.?)\s*\d+/i.test(text);
   // "sepetimde 751 TL var kargo ücreti öder miyim?" → bütçe filtresi DEĞİL
   const cartShippingNotBudget = looksLikeCartShippingFeeQuestion(message);
@@ -1044,9 +1051,12 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     }
   }
 
-  // "1000 TL altı", "bende 1000 lira var", "1000 liram var"
+  // "1000 TL altı", "500 liranın altında", "bende 1000 lira var"
   const maxPatterns = [
-    /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:altı|altında|kadar)/i,
+    new RegExp(
+      `(\\d+(?:[.,]\\d+)?)\\s*${moneyUnit}\\s*(?:altı|altında|kadar)`,
+      'i'
+    ),
     /(?:en fazla|maksimum|max\.?|en çok)\s*(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?/i,
     /(?:bütçe(?:m|niz|si)?|param|paramız|bende|elimde|cüzdanımda)\s*(?:ise\s*)?(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira(?:m|mız|nız)?|try)?/i,
     /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira(?:m|mız|nız)?|try)\s*(?:bütçe(?:m|miz)?|param)?\s*var/i,
@@ -1066,10 +1076,13 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     }
   }
 
-  // "1000 TL üzeri/üstünde" → exclusive; "en az 1000" → inclusive
+  // "1000 TL üzeri", "500 liranın üzerinde" → exclusive; "en az 1000" → inclusive
   if (filters.min_price == null) {
     const exclusiveMin = text.match(
-      /(\d+(?:[.,]\d+)?)\s*(?:tl|₺|lira|try)?\s*(?:üzeri|üstünde|üstü|ve üzeri)/i
+      new RegExp(
+        `(\\d+(?:[.,]\\d+)?)\\s*${moneyUnit}\\s*(?:üzeri|üzerinde|üstünde|üstü|ve üzeri)`,
+        'i'
+      )
     );
     if (exclusiveMin?.[1]) {
       const value = Number(exclusiveMin[1].replace(',', '.'));
@@ -1433,6 +1446,7 @@ function buildDeterministicListingReply(opts: DeterministicListingOptions): {
     if (opts.profileMm != null) bits.push(`${opts.profileMm} mm profil`);
     if (opts.cornerType) bits.push(`${opts.cornerType} köşe`);
     if (opts.maxPrice != null) bits.push(`${opts.maxPrice} TL altı`);
+    if (opts.minPrice != null) bits.push(`${opts.minPrice} TL üzeri`);
     const criteria = bits.length > 0 ? bits.join(' + ') : 'bu';
     return {
       reply: `${scopeLabel} ${criteria} kriterlerine uyan ürün bulunamadı. Filtreyi gevşetmeyi veya başka bir kategori denemeyi ister misiniz?`,
@@ -1446,6 +1460,15 @@ function buildDeterministicListingReply(opts: DeterministicListingOptions): {
   // oos kind zaten özetinde stok durumunu söylüyor; tekrarlama.
   const stockNote =
     allOos && opts.kind !== 'oos' ? ' Bu ürünler şu an stokta yok.' : '';
+
+  const priceBandBit =
+    opts.minPrice != null && opts.maxPrice != null
+      ? ` ${opts.minPrice}–${opts.maxPrice} TL arasında`
+      : opts.minPrice != null
+        ? ` ${opts.minPrice} TL üzeri`
+        : opts.maxPrice != null
+          ? ` ${opts.maxPrice} TL altı/eşit`
+          : '';
 
   let summary: string;
   if (opts.kind === 'all') {
@@ -1469,21 +1492,23 @@ function buildDeterministicListingReply(opts: DeterministicListingOptions): {
   } else if (opts.cornerType && opts.cornerCounts) {
     summary = `${scopeLabel} gönye köşe ${opts.cornerCounts.gönye} ürün, rondo köşe ${opts.cornerCounts.rondo} ürün bulunuyor. Aşağıdaki kartlarda ${opts.cornerType} köşeli ${count} ürünü görüyorsunuz.`;
   } else if (opts.profileMm != null) {
-    summary = `Evet — ${opts.profileMm} mm profil kalınlığında ${count} ürün var. Tümünü aşağıdaki kartlarda inceleyebilirsiniz.`;
+    summary = `Evet — ${opts.profileMm} mm profil kalınlığında${priceBandBit} ${count} ürün var. Tümünü aşağıdaki kartlarda inceleyebilirsiniz.`;
   } else if (opts.color) {
-    summary = `Evet, ${opts.color} renkte ${count} ürünümüz aşağıdadır.`;
+    summary = `Evet, ${opts.color} renkte${priceBandBit} ${count} ürünümüz aşağıdadır.`;
   } else if (opts.minPrice != null && opts.maxPrice != null) {
     summary = `Evet, ${opts.minPrice}–${opts.maxPrice} TL arasında${
       opts.dimension ? ` ${opts.dimension} ölçüsünde` : ''
     } ${count} ürün aşağıdadır.`;
   } else if (opts.dimension && opts.maxPrice != null) {
     summary = `Evet, ${opts.dimension} ölçüsünde ${opts.maxPrice} TL altı/eşit ${count} ürün aşağıdadır.`;
+  } else if (opts.dimension && opts.minPrice != null) {
+    summary = `Evet, ${opts.dimension} ölçüsünde ${opts.minPrice} TL üzeri ${count} ürün aşağıdadır.`;
   } else if (opts.dimension) {
     summary = `Evet, ${opts.dimension} ölçüsünde ${count} ürünümüz aşağıdadır.`;
   } else if (opts.maxPrice != null) {
     summary = `Evet, ${opts.maxPrice} TL altı/eşit ${count} ürün aşağıdadır.`;
   } else if (opts.minPrice != null) {
-    summary = `Evet, ${opts.minPrice} TL ve üzeri ${count} ürün aşağıdadır.`;
+    summary = `Evet, ${opts.minPrice} TL üzeri ${count} ürün aşağıdadır.`;
   } else if (opts.wantsSingle || opts.kind === 'rank') {
     const title =
       typeof products[0].metadata?.title === 'string'

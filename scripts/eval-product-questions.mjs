@@ -304,6 +304,47 @@ const CASES = [
     minProductSources: 3,
   },
   {
+    name: 'Gümüş + 500 liranın üzerinde → min fiyat (420/460 gelmesin)',
+    history: [
+      { role: 'user', content: 'ürün satın almak istiyorum' },
+      {
+        role: 'assistant',
+        content:
+          'Hangi ürünü satın almak istediğinizi belirtirseniz yardımcı olabilirim. Afiş çerçevesi veya kaldırım panosu gibi ürünlerimiz mevcut. Hangisini incelemek istersiniz?',
+      },
+      { role: 'user', content: 'afiş çerçevesi' },
+      {
+        role: 'assistant',
+        content: 'Afiş çerçevesi kategorisinde ürünlerimiz aşağıdadır.',
+      },
+    ],
+    q: 'gümüş ve 500 liranın üzerinde ürünleri görebilir miyim',
+    mustInclude: [/\[\[URUN_KARTLARI\]\]/i, /500\s*TL\s*üzeri|gümüş/i],
+    mustNotInclude: [/\b420\s*TL\b/i, /\b460\s*TL\b/i],
+    minProductSources: 1,
+    assertSources: (sources) => {
+      const bad = (sources || []).filter((s) => {
+        const price = s?.metadata?.price;
+        return typeof price === 'number' && price <= 500;
+      });
+      if (bad.length) {
+        return `min_price kaçtı: ≤500 TL ürünler: ${bad
+          .map((s) => `${s?.metadata?.title}:${s?.metadata?.price}`)
+          .join(', ')}`;
+      }
+      const notSilver = (sources || []).filter((s) => {
+        const color = String(s?.metadata?.color ?? '').toLocaleLowerCase('tr-TR');
+        return color && !color.includes('gümüş') && !color.includes('gumus');
+      });
+      if (notSilver.length) {
+        return `renk kaçtı: ${notSilver
+          .map((s) => `${s?.metadata?.title}:${s?.metadata?.color}`)
+          .join(', ')}`;
+      }
+      return null;
+    },
+  },
+  {
     name: 'Başka kategori kabul: 900 altı çerçeve (panosu pin yok)',
     history: [
       { role: 'user', content: 'başka ürün bakıcam 900 tl altında' },
@@ -583,6 +624,10 @@ function scoreReply(reply, testCase, sources) {
     if (!titles.some((title) => re.test(title))) {
       fails.push(`kartta eksik ürün: ${re}`);
     }
+  }
+  if (typeof testCase.assertSources === 'function') {
+    const err = testCase.assertSources(sources);
+    if (err) fails.push(String(err));
   }
   return fails;
 }
