@@ -1,4 +1,4 @@
-# Ores RAG Chatbot
+ RAG Chatbot
 
 Ores mağazası için Türkçe e-ticaret asistanı. Ürün kataloğu ve mağaza politikaları hakkında soruları yanıtlar; cevapları mümkün olduğunca belge ve veritabanı gerçeklerine dayandırır.
 
