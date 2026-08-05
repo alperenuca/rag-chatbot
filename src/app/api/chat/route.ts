@@ -714,6 +714,7 @@ function hasNewSearchCriterion(message: string): boolean {
     (filters.colors?.length ?? 0) > 0 ||
     filters.dimension != null ||
     filters.profile_thickness_mm != null ||
+    filters.corner_type != null ||
     filters.max_price != null ||
     filters.min_price != null
   );
@@ -948,6 +949,12 @@ function extractSearchFiltersFromMessage(message: string): Partial<SearchProduct
     if (measure) {
       filters.dimension = `${measure[1]}x${measure[2]}`;
     }
+  }
+
+  // Köşe tipi: "gönye köşeli" / "rondo köşe"
+  const cornerType = extractCornerTypeFromMessage(message);
+  if (cornerType) {
+    filters.corner_type = cornerType;
   }
 
   // Renk / görünüm — tek renk filtre; birden fazla renk = karşılaştırma (OR)
@@ -1507,9 +1514,46 @@ interface SearchProductsArgs {
   colors?: string[];
   /** Profil kalınlığı (mm), örn. 25 / 32 */
   profile_thickness_mm?: number;
+  /** Köşe tipi: "gönye" veya "rondo" */
+  corner_type?: CornerType;
   query_text?: string;
   sort_by?: SortBy;
   limit?: number;
+}
+
+type CornerType = 'gönye' | 'rondo';
+
+/**
+ * Köşe tipi metadata'da tutulmuyor (yalnızca content metninde "Köşe Tipi: ..."
+ * ve ürün adında geçiyor); bu yüzden filtre bellek içinde uygulanıyor.
+ */
+function docMatchesCornerType(doc: MatchedDocument, corner: CornerType): boolean {
+  const title = typeof doc.metadata?.title === 'string' ? doc.metadata.title : '';
+  const blob = `${doc.content ?? ''} ${title}`.toLocaleLowerCase('tr-TR');
+  const cornerField = blob.match(/köşe tipi\s*:\s*([^|]+)/i)?.[1] ?? blob;
+  return corner === 'gönye'
+    ? /gönye|gonye/i.test(cornerField)
+    : /rondo/i.test(cornerField);
+}
+
+function extractCornerTypeFromMessage(message: string): CornerType | null {
+  const t = message.toLocaleLowerCase('tr-TR');
+  if (/(gönye|gonye)/i.test(t)) return 'gönye';
+  if (/rondo/i.test(t)) return 'rondo';
+  return null;
+}
+
+/**
+ * "Gönye köşeli ürüne ihtiyacım var" dedikten sonra "afiş çerçevesi" yazan
+ * kullanıcı köşe tipini tekrar yazmıyor; kriteri son turlardan taşı.
+ */
+function inferCornerTypeFromHistory(history: HistoryTurn[]): CornerType | null {
+  const userTurns = history.filter((turn) => turn.role === 'user').slice(-4);
+  for (let i = userTurns.length - 1; i >= 0; i -= 1) {
+    const corner = extractCornerTypeFromMessage(userTurns[i].content);
+    if (corner) return corner;
+  }
+  return null;
 }
 
 // NOT: JS \b Unicode/Türkçe harflerde (ı, ş, ğ…) kırılır; \b kullanma.
@@ -2129,6 +2173,7 @@ function emptySearchGuard(
   if (filters.profile_thickness_mm != null) {
     bits.push(`profil ${filters.profile_thickness_mm} mm`);
   }
+  if (filters.corner_type) bits.push(`${filters.corner_type} köşe`);
   if (filters.colors?.length) bits.push(`renkler ${filters.colors.join('/')}`);
   else if (filters.color) bits.push(`renk ${filters.color}`);
   if (filters.category) bits.push(`kategori ${filters.category}`);
@@ -2194,6 +2239,12 @@ function buildSearchProductsTool(knownCategoriesText: string): ChatCompletionToo
             type: 'number',
             description:
               'Profil kalınlığı mm. Kullanıcı "32 mm profil", "25mm çerçeve" dediyse 32 veya 25 ver. Katalogda tipik değerler 25 ve 32.',
+          },
+          corner_type: {
+            type: 'string',
+            enum: ['gönye', 'rondo'],
+            description:
+              'Köşe tipi filtresi. Kullanıcı "gönye köşe(li)" dediyse "gönye", "rondo köşe(li)" dediyse "rondo" ver. Katalogda her iki tip de var; kullanıcı birini istediyse diğerini sonuçlara KARIŞTIRMA.',
           },
           query_text: {
             type: 'string',
@@ -2328,7 +2379,10 @@ async function executeSearchProducts(
     typeof args.limit === 'number' && Number.isFinite(args.limit) && args.limit > 0
       ? Math.min(Math.floor(args.limit), 200)
       : 100;
-  const fetchLimit = multiColors.length > 1 ? Math.max(limit, 100) : limit;
+  // Köşe tipi bellek içinde süzüldüğü için önce geniş çekip sonra kırpıyoruz;
+  // aksi halde limit=1 isteğinde yanlış köşe tipi tek sonuç olarak dönerdi.
+  const fetchLimit =
+    multiColors.length > 1 || args.corner_type ? Math.max(limit, 200) : limit;
 
   const { data, error } = await query.limit(fetchLimit);
 
@@ -2338,6 +2392,12 @@ async function executeSearchProducts(
   }
 
   let rows = (data ?? []) as MatchedDocument[];
+
+  if (args.corner_type) {
+    const corner = args.corner_type;
+    rows = rows.filter((doc) => docMatchesCornerType(doc, corner));
+    rows = rows.slice(0, limit);
+  }
 
   if (multiColors.length > 1) {
     const needles = multiColors.map((c) => c.toLocaleLowerCase('tr-TR'));
@@ -2912,6 +2972,14 @@ export async function POST(req: NextRequest) {
     // çağrısına (tool_choice kararına) ihtiyaç duymadan aynı sonuca ulaşır.
     const directCategoryMatches = isLikelyDirectCategoryBrowse(message, knownCategories);
     const messageFilters = extractSearchFiltersFromMessage(message);
+    // "Gönye köşeli ürün istiyorum" → "afiş çerçevesi": köşe kriteri önceki
+    // turda kaldığı için bu mesajda yok; taşımazsak rondo ürünler de listelenir.
+    if (messageFilters.corner_type == null) {
+      const cornerFromHistory = inferCornerTypeFromHistory(cleanHistory);
+      if (cornerFromHistory) {
+        messageFilters.corner_type = cornerFromHistory;
+      }
+    }
     if (relaxedProfileMm != null) {
       messageFilters.profile_thickness_mm = relaxedProfileMm;
       messageFilters.max_price = undefined;
@@ -3514,6 +3582,7 @@ export async function POST(req: NextRequest) {
         messageFilters.min_price != null ||
         messageFilters.color ||
         (messageFilters.colors && messageFilters.colors.length > 0) ||
+        messageFilters.corner_type != null ||
         messageFilters.profile_thickness_mm != null) &&
       !messageFilters.out_of_stock_only
     ) {
@@ -3615,6 +3684,21 @@ export async function POST(req: NextRequest) {
         messageFilters.profile_thickness_mm != null && documents.length > 0
           ? `PROFİL SONUCU (KESİN): ${messageFilters.profile_thickness_mm} mm için ${documents.length} ürün BULUNDU. "bulunmamaktadır / yoktur / yok" DEME; ürünü göster, stok 0 ise "(Stokta yok)" yaz.\n\n`
           : '';
+      // Köşe tipi sorusunda model var olan tipe "mevcut değil" diyebiliyor;
+      // iki tipin gerçek sayısını bağlama koy.
+      let cornerGuard = '';
+      let cornerCounts: { gönye: number; rondo: number } | null = null;
+      if (messageFilters.corner_type) {
+        const scopeDocs = await executeSearchProducts(supabase, knownCategories, {
+          ...(filterCategories[0] ? { category: filterCategories[0] } : {}),
+          limit: 200,
+        });
+        cornerCounts = {
+          gönye: scopeDocs.filter((doc) => docMatchesCornerType(doc, 'gönye')).length,
+          rondo: scopeDocs.filter((doc) => docMatchesCornerType(doc, 'rondo')).length,
+        };
+        cornerGuard = `KÖŞE TİPİ (KESİN): Bu aramada "${messageFilters.corner_type} köşe" filtresi uygulandı; kartlardaki ${documents.length} ürünün TAMAMI ${messageFilters.corner_type} köşedir. Aynı kapsamda gönye köşe ${cornerCounts.gönye} ürün, rondo köşe ${cornerCounts.rondo} ürün var. Sayısı sıfır olmayan bir köşe tipi için "yok / mevcut değil / bulamadım" DEME.\n\n`;
+      }
 
       const filterCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
@@ -3623,7 +3707,7 @@ export async function POST(req: NextRequest) {
             role: 'system',
             content: buildSystemPrompt({
               knownCategoriesText,
-              contextText: `${budgetGuard}${profileHitGuard}${multiGuard}${colorCompareGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
+              contextText: `${budgetGuard}${cornerGuard}${profileHitGuard}${multiGuard}${colorCompareGuard}${priceStockGuard}${filterGuard}${filterDerived.contextText}`,
               hasProductCards: filterDerived.hasProductCards,
               isAmbiguousGenericQuery: filterDerived.isAmbiguousGenericQuery,
               toolActive: true,
@@ -3646,6 +3730,20 @@ export async function POST(req: NextRequest) {
       ) {
         rawReply = `Hayır, "${filterCategories[0]}" kategorisinde ${messageFilters.max_price} TL ve altında ürün bulunmamaktadır. Daha yüksek bir bütçe veya başka bir kategori (ör. afiş çerçevesi) denemek ister misiniz?`;
         hasProductCards = false;
+      }
+      // Model "gönye köşeli mevcut değil" gibi yanlış bir inkâra giderse
+      // (kartlar dolu olduğu halde) sayıları kendimiz yazıyoruz.
+      if (
+        messageFilters.corner_type &&
+        cornerCounts &&
+        documents.length > 0 &&
+        /(bulunmamaktadır|bulunmuyor|yoktur|mevcut değil|bulamadım|ürün yok)/i.test(rawReply)
+      ) {
+        const corner = messageFilters.corner_type;
+        const scopeLabel = filterCategories[0]
+          ? `"${filterCategories[0]}" kategorisinde`
+          : 'kataloğumuzda';
+        rawReply = `${scopeLabel} gönye köşe ${cornerCounts.gönye} ürün, rondo köşe ${cornerCounts.rondo} ürün bulunuyor. Aşağıdaki kartlarda ${corner} köşeli ${documents.length} ürünü görüyorsunuz.\n\n${PRODUCT_CARDS_PLACEHOLDER}\n\nDiğer köşe tipini de listelemek ister misiniz?`;
       }
       // Profil filtresi sonuç verdiyse modelin "yok" demesini düzelt
       if (
@@ -3837,6 +3935,7 @@ export async function POST(req: NextRequest) {
             dimension: args.dimension || messageFilters.dimension,
             profile_thickness_mm:
               args.profile_thickness_mm ?? messageFilters.profile_thickness_mm,
+            corner_type: args.corner_type ?? messageFilters.corner_type,
             colors: mergedColors.length > 1 ? mergedColors : undefined,
             color:
               mergedColors.length > 1

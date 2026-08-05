@@ -16,7 +16,7 @@ if (!url || !anon || !service) {
   process.exit(1);
 }
 
-/** @type {{ name: string, q: string, history?: {role:string,content:string}[], mustInclude?: RegExp[], mustNotInclude?: RegExp[], minProductSources?: number, maxProductSources?: number }[]} */
+/** @type {{ name: string, q: string, history?: {role:string,content:string}[], mustInclude?: RegExp[], mustNotInclude?: RegExp[], minProductSources?: number, maxProductSources?: number, productTitlesMustInclude?: RegExp[], productTitlesMustNotInclude?: RegExp[] }[]} */
 const CASES = [
   {
     name: 'En ucuz çerçeve',
@@ -363,6 +363,37 @@ const CASES = [
     maxProductSources: 1,
   },
   {
+    name: 'Gönye köşe filtresi: kartlara rondo karışmasın',
+    q: 'gönye köşeli ürüne ihtiyacım var',
+    mustInclude: [/gönye/i, /\[\[URUN_KARTLARI\]\]/i],
+    minProductSources: 15,
+    productTitlesMustInclude: [/gönye/i],
+    productTitlesMustNotInclude: [/rondo/i],
+  },
+  {
+    name: 'Köşe kriteri geçmişten taşınır (kategori ikinci turda)',
+    history: [
+      { role: 'user', content: 'gönye köşeli ürüne ihtiyacım var' },
+      {
+        role: 'assistant',
+        content:
+          'Gönye köşeli ürünlerimiz arasında "Afiş Çerçevesi" veya "Kaldırım Panosu" kategorilerinden birini tercih edebilirsiniz. Hangi kategoriyle ilgilendiğinizi belirtir misiniz?',
+      },
+    ],
+    q: 'afiş çerçevesi',
+    mustInclude: [/\[\[URUN_KARTLARI\]\]/i],
+    minProductSources: 15,
+    productTitlesMustNotInclude: [/rondo/i],
+  },
+  {
+    name: 'Rondo köşe filtresi: gönye karışmasın',
+    q: 'rondo köşeli çerçeveleri göster',
+    mustInclude: [/rondo/i, /\[\[URUN_KARTLARI\]\]/i],
+    minProductSources: 5,
+    productTitlesMustInclude: [/rondo/i],
+    productTitlesMustNotInclude: [/gönye/i],
+  },
+  {
     name: 'Hangi renkler var: katalog renk dökümü',
     history: [
       { role: 'user', content: 'afiş çerçevesi' },
@@ -428,6 +459,19 @@ function scoreReply(reply, testCase, sources) {
   if (typeof testCase.maxProductSources === 'number') {
     if (productN > testCase.maxProductSources) {
       fails.push(`productSources ${productN} > ${testCase.maxProductSources}`);
+    }
+  }
+  // Kart içeriği: metinde görünmeyen ürünler (örn. yanlış köşe tipi) için
+  const titles = (Array.isArray(sources) ? sources : [])
+    .filter((s) => s?.metadata?.type === 'product')
+    .map((s) => String(s?.metadata?.title ?? ''));
+  for (const re of testCase.productTitlesMustNotInclude || []) {
+    const hit = titles.find((title) => re.test(title));
+    if (hit) fails.push(`kartta yasak ürün (${re}): ${hit}`);
+  }
+  for (const re of testCase.productTitlesMustInclude || []) {
+    if (!titles.some((title) => re.test(title))) {
+      fails.push(`kartta eksik ürün: ${re}`);
     }
   }
   return fails;
