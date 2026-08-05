@@ -7,13 +7,24 @@ import AuthScreen from '@/components/AuthScreen';
 import UserMenu from '@/components/UserMenu';
 import ConversationSidebar, { ConversationSummary } from '@/components/ConversationSidebar';
 import { useAuth } from '@/context/AuthContext';
-import { consumeChatSse } from '@/lib/chat-stream';
+import {
+  consumeChatSse,
+  emitReplyChunks,
+  type ChatStreamPayload,
+  type ChatTraceStep,
+} from '@/lib/chat-stream';
 import type { DocumentSource } from '@/components/SourcesAccordion';
 
 const WELCOME_MESSAGE: ChatMessageData = {
   role: 'assistant',
   content: 'Merhaba! Ürünlerimiz ve politikalarımız hakkında size nasıl yardımcı olabilirim?',
   timestamp: Date.now(),
+};
+
+const LOCAL_PENDING_STEP: ChatTraceStep = {
+  id: 'local-pending',
+  phase: 'route',
+  label: 'İstek gönderildi, süreç izleniyor…',
 };
 
 interface StoredMessageRow {
@@ -208,6 +219,7 @@ export default function Home() {
           role: 'assistant',
           content: '',
           streaming: true,
+          steps: [LOCAL_PENDING_STEP],
           timestamp: assistantTs,
         },
       ]);
@@ -219,6 +231,26 @@ export default function Home() {
           for (let i = next.length - 1; i >= 0; i -= 1) {
             if (next[i].role === 'assistant') {
               next[i] = { ...next[i], ...patch };
+              break;
+            }
+          }
+          return next;
+        });
+      };
+
+      const appendAssistantStep = (step: ChatTraceStep) => {
+        setMessages((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            if (next[i].role === 'assistant' && next[i].streaming) {
+              const prevSteps = (next[i].steps ?? []).filter(
+                (s) => s.id !== LOCAL_PENDING_STEP.id
+              );
+              if (prevSteps.some((s) => s.id === step.id)) break;
+              next[i] = {
+                ...next[i],
+                steps: [...prevSteps, step],
+              };
               break;
             }
           }
@@ -256,17 +288,47 @@ export default function Home() {
               data.conversationTitle ?? null
             );
           }
+          const reply = typeof data.reply === 'string' ? data.reply : '';
+          const steps = Array.isArray(data.steps)
+            ? (data.steps as ChatTraceStep[])
+            : undefined;
+          if (steps?.length) patchLastAssistant({ steps });
+          // JSON tek seferde gelir — kelime kelime yaz
+          if (reply) {
+            await emitReplyChunks(reply, (chunk) => {
+              setMessages((prev) => {
+                const next = [...prev];
+                for (let i = next.length - 1; i >= 0; i -= 1) {
+                  if (next[i].role === 'assistant' && next[i].streaming) {
+                    next[i] = {
+                      ...next[i],
+                      content: `${next[i].content}${chunk}`,
+                    };
+                    break;
+                  }
+                }
+                return next;
+              });
+            });
+          }
           patchLastAssistant({
-            content: typeof data.reply === 'string' ? data.reply : '',
+            content: reply,
             sources: data.sources as DocumentSource[] | undefined,
             citations: data.citations as DocumentSource[] | undefined,
+            steps,
             streaming: false,
           });
           return;
         }
 
-        let sawDone = false;
-        let streamedText = '';
+        let assembled = '';
+        let liveStreaming = false;
+        let lastDeltaAt = 0;
+        // Obje ile tut: callback atamasını TS daraltmasın
+        const sseBox: { done: ChatStreamPayload | null } = { done: null };
+        const seenStepIds = new Set<string>();
+        let stepQueue: Promise<void> = Promise.resolve();
+
         await consumeChatSse(response, {
           onMeta: (meta) => {
             if (meta.conversationId) {
@@ -277,24 +339,28 @@ export default function Home() {
               );
             }
           },
-          onDelta: (text) => {
-            streamedText += text;
-            setMessages((prev) => {
-              const next = [...prev];
-              for (let i = next.length - 1; i >= 0; i -= 1) {
-                if (next[i].role === 'assistant' && next[i].streaming) {
-                  next[i] = {
-                    ...next[i],
-                    content: `${next[i].content}${text}`,
-                  };
-                  break;
-                }
-              }
-              return next;
+          onStep: (step) => {
+            if (seenStepIds.has(step.id)) return;
+            seenStepIds.add(step.id);
+            // Buffer’lı SSE’de adımlar aynı anda gelir → UI’da kademeli göster
+            stepQueue = stepQueue.then(async () => {
+              appendAssistantStep(step);
+              await new Promise((r) => setTimeout(r, 90));
             });
           },
+          onDelta: (text) => {
+            assembled += text;
+            const now = performance.now();
+            if (lastDeltaAt > 0 && now - lastDeltaAt > 45) {
+              liveStreaming = true;
+            }
+            lastDeltaAt = now;
+            if (liveStreaming) {
+              patchLastAssistant({ content: assembled });
+            }
+          },
           onDone: (data) => {
-            sawDone = true;
+            sseBox.done = data;
             if (data.conversationId) {
               setConversationId(data.conversationId);
               upsertConversationSummary(
@@ -302,24 +368,52 @@ export default function Home() {
                 data.conversationTitle ?? null
               );
             }
-            patchLastAssistant({
-              content: data.reply,
-              sources: data.sources as DocumentSource[] | undefined,
-              citations: data.citations as DocumentSource[] | undefined,
-              streaming: false,
-            });
           },
           onError: (message) => {
             throw new Error(message);
           },
         });
 
-        if (!sawDone) {
-          if (!streamedText.trim()) {
-            throw new Error('Yanıt tamamlanamadı.');
-          }
-          patchLastAssistant({ streaming: false });
+        await stepQueue;
+
+        const completed = sseBox.done;
+        const reply =
+          typeof completed?.reply === 'string' && completed.reply.length > 0
+            ? completed.reply
+            : assembled;
+        if (!reply.trim() && !completed) {
+          throw new Error('Yanıt tamamlanamadı.');
         }
+
+        // Proxy tüm gövdeyi tuttuysa delta’lar tek tick’te gelir → burada typewriter
+        if (!liveStreaming && reply) {
+          patchLastAssistant({ content: '' });
+          await emitReplyChunks(reply, (chunk) => {
+            setMessages((prev) => {
+              const next = [...prev];
+              for (let i = next.length - 1; i >= 0; i -= 1) {
+                if (next[i].role === 'assistant' && next[i].streaming) {
+                  next[i] = {
+                    ...next[i],
+                    content: `${next[i].content}${chunk}`,
+                  };
+                  break;
+                }
+              }
+              return next;
+            });
+          });
+        } else if (reply) {
+          patchLastAssistant({ content: reply });
+        }
+
+        patchLastAssistant({
+          content: reply,
+          sources: completed?.sources as DocumentSource[] | undefined,
+          citations: completed?.citations as DocumentSource[] | undefined,
+          steps: completed?.steps,
+          streaming: false,
+        });
       } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : 'Yanıt alınamadı.';
         patchLastAssistant({
@@ -422,19 +516,6 @@ export default function Home() {
                 />
               ))}
 
-            {/* Stream balonu içinde noktalar var; yalnızca o yoksa yedek bounce */}
-            {loading && !messages.some((m) => m.streaming) && (
-              <div className="flex items-end gap-2">
-                <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-500 border border-neutral-200">
-                  <Bot className="h-4 w-4" />
-                </div>
-                <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-500 shadow-sm shadow-neutral-900/5">
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-red-400" />
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-red-400 [animation-delay:0.2s]" />
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-red-400 [animation-delay:0.4s]" />
-                </div>
-              </div>
-            )}
             <div ref={messagesEndRef} />
           </div>
         </div>

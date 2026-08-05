@@ -3,7 +3,12 @@ import OpenAI from 'openai';
 import type { ChatCompletionMessageParam, ChatCompletionTool } from 'openai/resources/chat/completions';
 import dotenv from 'dotenv';
 import { createClient } from '@/lib/supabase/server';
-import { streamFromChatJsonWork } from '@/lib/chat-stream';
+import {
+  emitReplyChunks,
+  streamFromChatJsonWork,
+  type ChatTracePhase,
+  type ChatTraceStep,
+} from '@/lib/chat-stream';
 
 // Yerelde .env.local'ı yükle. Vercel'de ortam değişkenleri zaten
 // process.env üzerinden gelir; production'da dosya aramaya gerek yok.
@@ -537,6 +542,38 @@ function isLikelyDirectCategoryBrowse(message: string, knownCategories: string[]
   if (wordCount > 22) return [];
 
   return findMentionedCategories(message, knownCategories);
+}
+
+/**
+ * "ürün satın almak istiyorum" — kategori seçtir; vektör+LLM fallback’e düşmesin
+ * (aksi halde uzun süre yalnızca typing noktaları görünür).
+ */
+function looksLikeGenericPurchaseIntent(message: string): boolean {
+  const t = message.toLocaleLowerCase('tr-TR').trim();
+  if (!t || t.length > 100) return false;
+  if (hasNewSearchCriterion(message)) return false;
+  if (wantsAllCatalogProducts(message)) return false;
+  if (looksLikeRankingOrSingleItemQuestion(message)) return false;
+  // Belirli kategori/ürün zaten seçilmiştüyse menü değil
+  if (/(afiş|çerçeve|pano|kaldırım|gönye|rondo|\bA\d\b|\d+\s*mm|\d+\s*tl)/i.test(t)) {
+    return false;
+  }
+  return (
+    /(ürün\s*)?(satın\s*)?almak\s*istiyorum/.test(t) ||
+    /alışveriş\s*yapmak\s*istiyorum/.test(t) ||
+    /^(merhaba|selam)[,!.]?\s*(size\s*)?(ürün\s*)?(satın\s*)?almak/.test(t) ||
+    /^ne\s*(alabilirim|alsam|önerirsin)/.test(t) ||
+    /bana\s*(bir\s*)?ürün\s*öner/.test(t) ||
+    /^ürünleriniz\s*(neler|var)?\s*\??$/.test(t)
+  );
+}
+
+function buildCategoryMenuReply(knownCategories: string[]): string {
+  const cats =
+    knownCategories.length > 0
+      ? knownCategories.map((c) => `"${c}"`).join(' veya ')
+      : '"Afiş Çerçevesi" veya "Kaldırım Panosu"';
+  return `Hangi ürünü satın almak istediğinizi belirtirseniz yardımcı olabilirim. ${cats} kategorilerimiz mevcut. Hangisini incelemek istersiniz?`;
 }
 
 /** "Tüm ürünleri göster / katalogdaki her şey / hepsine bakmak istiyorum" */
@@ -3392,11 +3429,10 @@ function buildSystemPrompt(params: BuildSystemPromptParams): string {
 
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as Record<string, unknown>;
-  // UI stream:true → SSE hemen + LLM token’ları canlı; deterministikte typewriter.
-  // Eval / eski istemci stream göndermez → JSON.
+  // UI stream:true → SSE hemen + step/delta; eval JSON kalır.
   if (body?.stream === true) {
-    return streamFromChatJsonWork((onDelta) =>
-      processChatRequest({ ...body, stream: false }, onDelta)
+    return streamFromChatJsonWork(({ onDelta, onStep }) =>
+      processChatRequest({ ...body, stream: false }, onDelta, onStep)
     );
   }
   return processChatRequest(body);
@@ -3404,10 +3440,37 @@ export async function POST(req: NextRequest) {
 
 async function processChatRequest(
   body: Record<string, unknown>,
-  onDelta?: (text: string) => void
+  onDelta?: (text: string) => void,
+  onStep?: (step: ChatTraceStep) => void
 ): Promise<NextResponse> {
   try {
     const { message, conversationId, history } = body;
+    // Her soruda akış: LLM token veya cevap hazır olunca typewriter (DB kaydından ÖNCE)
+    let deltaEmitted = false;
+    const pushDelta = onDelta
+      ? (text: string) => {
+          if (!text) return;
+          deltaEmitted = true;
+          onDelta(text);
+        }
+      : undefined;
+
+    const steps: ChatTraceStep[] = [];
+    let stepSeq = 0;
+    const pushStep = (
+      phase: ChatTracePhase,
+      label: string,
+      detail?: string
+    ) => {
+      const step: ChatTraceStep = {
+        id: `s${++stepSeq}`,
+        phase,
+        label,
+        ...(detail ? { detail } : {}),
+      };
+      steps.push(step);
+      onStep?.(step);
+    };
 
     if (!message || typeof message !== 'string') {
       return NextResponse.json(
@@ -3415,6 +3478,9 @@ async function processChatRequest(
         { status: 400 }
       );
     }
+
+    // İlk adımı hemen bas — aksi halde uzun hazırlıkta UI yalnızca nokta görür
+    pushStep('route', 'Mesaj analiz ediliyor…', 'phase=bootstrap');
 
     const cleanHistory: HistoryTurn[] = Array.isArray(history)
       ? history
@@ -3444,11 +3510,17 @@ async function processChatRequest(
       );
     }
 
+    pushStep('retrieve', 'Katalog kategorileri yükleniyor…');
     const knownCategories = await getKnownCategories(supabase);
     const knownCategoriesText =
       knownCategories.length > 0
         ? knownCategories.join(', ')
         : 'Kategori bilgisi şu anda alınamadı.';
+    pushStep(
+      'retrieve',
+      'Kategoriler hazır',
+      `categories=${knownCategories.length}`
+    );
     const shippingCartPrefix = await shippingQuantityCartHint(
       message,
       supabase,
@@ -3655,6 +3727,16 @@ async function processChatRequest(
     // Takip detay sorusu: son konuşulan ürün kilidi aktifse tool çağırmadan
     // doğrudan o ürünün tam içeriğiyle cevap ver (kart listesi değil, metin detay).
     if (pinnedFollowUpProduct) {
+      const pinTitle =
+        typeof documents[0]?.metadata?.title === 'string'
+          ? documents[0].metadata.title
+          : 'kilitli ürün';
+      pushStep('route', 'Konuşulan ürüne kilitlendim', `path=pin · ${pinTitle}`);
+      pushStep(
+        'retrieve',
+        'Ürün kaydı yüklendi',
+        `docs=${documents.filter((d) => d.metadata?.type === 'product').length}`
+      );
       const followUpDerived = buildDerivedPromptFields(documents, false);
       // "incelemek / göstermek isterim" → kart da gelsin; sadece metin detayda
       // "aşağıda" deyip kartsız kalmasın (kaldırım panosu stok=0 senaryosu).
@@ -3699,15 +3781,19 @@ async function processChatRequest(
           : null;
 
       if (stockQtyReply) {
+        pushStep('compose', 'Stok / adet cevabı hazırlandı', 'path=pin_stock');
         rawReply = stockQtyReply;
         hasProductCards = false;
       } else if (pinnedShipReply) {
+        pushStep('compose', 'Kargo × adet cevabı hazırlandı', 'path=pin_ship');
         rawReply = pinnedShipReply;
         hasProductCards = false;
       } else if (affordReply) {
+        pushStep('compose', 'Bütçe yeterlilik cevabı hazırlandı', 'path=pin_afford');
         rawReply = affordReply;
         hasProductCards = false;
       } else {
+      pushStep('llm', 'Ürün detayı üretiliyor…', 'model=gpt-4o-mini');
       // "profil kalınlığı ne?" → metadata'da varsa kesin cevap (content'te olmayabilir)
       let propertyGuard = '';
       if (/(profil|kalınl[ıi]k|kaç\s*mm)/i.test(message)) {
@@ -3750,7 +3836,7 @@ async function processChatRequest(
           ],
           temperature: 0.2,
         },
-        onDelta
+        pushDelta
       );
       if (propertyGuard) {
         const mmMatch = propertyGuard.match(/profil kalınlığı (\d+(?:\.\d+)?) mm/i);
@@ -3936,19 +4022,47 @@ async function processChatRequest(
       }
     } else if (cartShippingFeeReply) {
       // "sepetimde 751 TL kargo ücreti öder miyim?" → eşik cevabı; 751 TL altı katalog DEĞİL
+      pushStep('route', 'Sepet tutarı × kargo eşiği', 'path=cart_shipping');
+      pushStep('compose', 'Ücretsiz kargo kuralı uygulandı', `eşik=750TL`);
       documents = [];
       hasProductCards = false;
       bypassCardSanitize = true;
       rawReply = cartShippingFeeReply;
     } else if (shippingCartResult) {
+      pushStep('route', 'Adet × ürün kargo hesabı', 'path=shipping_qty');
+      pushStep(
+        'retrieve',
+        'Ürün fiyatı katalogdan alındı',
+        `docs=${shippingCartResult.docs.length}`
+      );
       documents = shippingCartResult.docs;
       const shippingReply = buildShippingQuantityCartReply(shippingCartResult);
       rawReply = shippingReply.reply;
       hasProductCards = shippingReply.hasProductCards;
+      pushStep('compose', 'Kargo cevabı yazıldı');
     } else if (dualRequestResult) {
+      pushStep('route', 'Çift istek (yoksa …) yolu', 'path=dual_request');
       documents = dualRequestResult.docs;
       rawReply = dualRequestResult.reply;
       hasProductCards = dualRequestResult.hasProductCards;
+      pushStep(
+        'retrieve',
+        'Yedek liste hazırlandı',
+        `docs=${dualRequestResult.docs.length}`
+      );
+    } else if (looksLikeGenericPurchaseIntent(message)) {
+      // "ürün satın almak istiyorum" → menü; embedding/LLM beklemesin
+      pushStep('route', 'Genel alışveriş niyeti → kategori menüsü', 'path=category_menu');
+      pushStep(
+        'retrieve',
+        'Katalog kategorileri okundu',
+        `categories=${knownCategories.length}`
+      );
+      documents = [];
+      hasProductCards = false;
+      bypassCardSanitize = true;
+      rawReply = buildCategoryMenuReply(knownCategories);
+      pushStep('compose', 'Menü cevabı hazırlandı');
     } else if (acceptAlternateCategory) {
       const altCategory =
         findMentionedCategories(message, knownCategories)[0] ??
@@ -3994,10 +4108,16 @@ async function processChatRequest(
         bypassCardSanitize = listing.bypassCardSanitize;
       }
     } else if (wantsAllCatalogProducts(message)) {
+      pushStep('route', 'Tüm katalog isteniyor', 'path=all_catalog');
       documents = await executeSearchProducts(supabase, knownCategories, {
         sort_by: 'price_asc',
         limit: 200,
       });
+      pushStep(
+        'retrieve',
+        `Kataloğda ${documents.length} ürün bulundu`,
+        `docs=${documents.length}`
+      );
       {
         const listing = buildDeterministicListingReply({
           docs: documents,
@@ -4007,6 +4127,7 @@ async function processChatRequest(
         rawReply = listing.reply;
         hasProductCards = listing.hasProductCards;
         bypassCardSanitize = listing.bypassCardSanitize;
+        pushStep('compose', 'Tüm ürün listesi yazıldı');
       }
     } else if (looksLikeCatalogCountQuestion(message)) {
       // "27 adet yok mu?" — önceki kategori / mesajdan sayıyı DB'den doğrula
@@ -4163,7 +4284,7 @@ async function processChatRequest(
           ],
           temperature: 0.2,
         },
-        onDelta
+        pushDelta
       );
       if (
         documents.length > 0 &&
@@ -4261,6 +4382,7 @@ async function processChatRequest(
         messageFilters.profile_thickness_mm != null) &&
       !messageFilters.out_of_stock_only
     ) {
+      pushStep('route', 'Filtreli ürün araması', 'path=filter');
       // "5000 TL altı var mı?" → kullanıcı daha önce kategori seçtiyse onu taşı.
       // Asistan menüsündeki "afiş / kaldırım" isimlerini kategori seçimi SAYMA.
       let filterCategories = findMentionedCategories(message, knownCategories);
@@ -4347,6 +4469,43 @@ async function processChatRequest(
 
       documents = filterDocs;
 
+      {
+        const filterBits: string[] = [];
+        if (filterCategories[0]) filterBits.push(`kategori=${filterCategories[0]}`);
+        if (messageFilters.max_price != null) {
+          filterBits.push(`fiyat≤${messageFilters.max_price}`);
+        }
+        if (messageFilters.min_price != null) {
+          filterBits.push(
+            messageFilters.min_price_exclusive
+              ? `fiyat>${messageFilters.min_price}`
+              : `fiyat≥${messageFilters.min_price}`
+          );
+        }
+        if (messageFilters.dimension) filterBits.push(`ölçü=${messageFilters.dimension}`);
+        if (messageFilters.color) filterBits.push(`renk=${messageFilters.color}`);
+        if (messageFilters.colors?.length) {
+          filterBits.push(`renkler=${messageFilters.colors.join('+')}`);
+        }
+        if (messageFilters.corner_type) {
+          filterBits.push(`köşe=${messageFilters.corner_type}`);
+        }
+        if (messageFilters.profile_thickness_mm != null) {
+          filterBits.push(`profil=${messageFilters.profile_thickness_mm}mm`);
+        }
+        if (messageFilters.in_stock_only) filterBits.push('stokta');
+        pushStep(
+          'filter',
+          'Arama filtreleri uygulandı',
+          filterBits.join(' · ') || 'path=filter'
+        );
+        pushStep(
+          'retrieve',
+          `Katalogdan ${filterDocs.length} ürün bulundu`,
+          `docs=${filterDocs.length}`
+        );
+      }
+
       let cornerCounts: { gönye: number; rondo: number } | null = null;
       if (messageFilters.corner_type) {
         const scopeDocs = await executeSearchProducts(supabase, knownCategories, {
@@ -4379,8 +4538,18 @@ async function processChatRequest(
         rawReply = listing.reply;
         hasProductCards = listing.hasProductCards;
         bypassCardSanitize = listing.bypassCardSanitize;
+        pushStep(
+          'compose',
+          hasProductCards ? 'Ürün listesi ve kartlar hazırlandı' : 'Filtre cevabı yazıldı',
+          `cards=${hasProductCards}`
+        );
       }
     } else if (directCategoryMatches.length > 0) {
+      pushStep(
+        'route',
+        'Kategori tarama',
+        `path=category · ${directCategoryMatches.join(', ')}`
+      );
       const categoryResultDocs: MatchedDocument[] = [];
       for (const category of directCategoryMatches) {
         categoryResultDocs.push(
@@ -4430,10 +4599,18 @@ async function processChatRequest(
         rawReply = listing.reply;
         hasProductCards = listing.hasProductCards;
         bypassCardSanitize = listing.bypassCardSanitize;
+        pushStep(
+          'retrieve',
+          `Kategoride ${documents.length} ürün bulundu`,
+          `docs=${documents.length}`
+        );
+        pushStep('compose', 'Kategori listesi yazıldı', 'path=category');
       }
     } else {
       // 2. Fallback: politika / belirsiz / tool yolu. Baseline vektör
       // araması yalnızca burada çalışır — pin/filtre yollarında atlanır.
+      pushStep('route', 'Genel / politika / araç yolu', 'path=fallback');
+      pushStep('retrieve', 'Vektör araması çalışıyor…', 'match_documents');
       const {
         documents: baselineDocs,
         error: matchError,
@@ -4448,12 +4625,55 @@ async function processChatRequest(
       }
 
       documents = baselineDocs;
+      pushStep(
+        'retrieve',
+        `Vektör aramada ${baselineDocs.length} belge bulundu`,
+        `docs=${baselineDocs.length}`
+      );
       const baseline = buildDerivedPromptFields(documents, false);
+
+      // Politika / genel metin: tool yok → canlı token stream
+      const livePolicyText =
+        Boolean(pushDelta) &&
+        looksLikePolicyQuestion(message) &&
+        !hasNewSearchCriterion(message) &&
+        findMentionedCategories(message, knownCategories).length === 0 &&
+        !looksLikeRankingOrSingleItemQuestion(message) &&
+        !/(göster|listele|ürünler|hangileri)/i.test(message);
 
       // İlk model çağrısı: baseline ile doğrudan cevap veya search_products.
       // ÖNEMLİ: baseline (toolActive:false) yanıtında hasProductCards HER
       // ZAMAN false'tur; kartlar sadece gerçek bir tool çağrısı sonucunda
       // (aşağıdaki if bloğunda) gösterilir.
+      if (livePolicyText) {
+        pushStep('llm', 'Politika cevabı üretiliyor…', 'model=gpt-4o-mini · tools=off');
+        rawReply = await streamOrCompleteChat(
+          {
+            model: 'gpt-4o-mini',
+            messages: [
+              {
+                role: 'system',
+                content: buildSystemPrompt({
+                  knownCategoriesText,
+                  contextText: baseline.contextText,
+                  hasProductCards: false,
+                  isAmbiguousGenericQuery: false,
+                  toolActive: false,
+                  userMessage: message,
+                  extraContextPrefix: shippingCartPrefix,
+                }),
+              },
+              ...historyMessages,
+              { role: 'user', content: message },
+            ],
+            temperature: 0.2,
+          },
+          pushDelta
+        );
+        hasProductCards = false;
+        pushStep('compose', 'Politika cevabı tamamlandı');
+      } else {
+      pushStep('llm', 'Model araç kararı veriyor…', 'tool_choice=auto');
       const firstCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         messages: [
@@ -4488,6 +4708,11 @@ async function processChatRequest(
         // bir çağrı yapabilir, veya "en ağır ürün hangisi" için sort_by +
         // limit=1 gönderir). Her çağrıyı gerçek bir Supabase sorgusuna
         // çevirip sonuçları topluyoruz.
+        pushStep(
+          'tools',
+          `search_products çağrılıyor (${toolCalls.length})`,
+          `tools=${toolCalls.length}`
+        );
         const toolResultDocs: MatchedDocument[] = [];
         const toolResponseMessages: ChatCompletionMessageParam[] = [];
 
@@ -4608,12 +4833,20 @@ async function processChatRequest(
         rawReply = listing.reply;
         hasProductCards = listing.hasProductCards;
         bypassCardSanitize = listing.bypassCardSanitize;
+        pushStep(
+          'retrieve',
+          `Araç sonucu: ${documents.length} ürün`,
+          `docs=${documents.length}`
+        );
+        pushStep('compose', 'Tool sonucu listeye dönüştürüldü');
       } else {
         // Tool çağrılmadı: bu mesajda kesinlikle kart gösterilmeyecek,
         // `documents` baseline (vektör arama) sonuçlarında kalır (sadece
         // kaydetme/log amaçlı; kart render'ını etkilemez).
         hasProductCards = false;
+        pushStep('compose', 'Model metin cevabı verdi (araç yok)');
       }
+      } // livePolicyText else
     }
     } // pinnedFollowUpProduct else sonu
 
@@ -4697,7 +4930,19 @@ async function processChatRequest(
       }
     }
 
+    // Streaming: nihai metni DB kaydından ÖNCE akıt (her soru tipi).
+    // LLM zaten pushDelta ile yazdıysa tekrar typewriter yapma.
+    if (steps.length === 0) {
+      pushStep('compose', 'Cevap hazırlandı', 'path=other');
+    }
+    if (pushDelta && !deltaEmitted && reply) {
+      pushStep('compose', 'Cevap metni akıtılıyor…');
+      await emitReplyChunks(reply, pushDelta);
+    }
+
     // 5. Sohbeti ve mesajları kalıcı olarak sakla.
+    // (UI stream’de cevap zaten aktı; yavaş DB yazımı SSE’yi bloklamasın diye
+    //  client typewriter + step paneli ayrıca buffer’a karşı korunuyor.)
     const conversationResult = await ensureConversation(
       supabase,
       user.id,
@@ -4747,6 +4992,7 @@ async function processChatRequest(
       citations: citationSources,
       conversationId: activeConversationId,
       conversationTitle: conversationResult?.title ?? null,
+      steps,
     });
   } catch (err: unknown) {
     console.error('Chat API Error:', err);

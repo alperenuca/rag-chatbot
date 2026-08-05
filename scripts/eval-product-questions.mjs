@@ -279,6 +279,13 @@ const CASES = [
     maxProductSources: 0,
   },
   {
+    name: 'Ürün satın almak istiyorum → kategori menüsü (LLM beklemesin)',
+    q: 'ürün satın almak istiyorum',
+    mustInclude: [/afiş|çerçeve/i, /kaldırım|pano/i, /hangi/i],
+    mustNotInclude: [/\[\[URUN_KARTLARI\]\]/i],
+    maxProductSources: 0,
+  },
+  {
     name: 'Sadece bütçe: asistan menüsü panoya kilitlemesin',
     history: [
       { role: 'user', content: 'ürün satın almak istiyorum' },
