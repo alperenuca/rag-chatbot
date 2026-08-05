@@ -161,6 +161,21 @@ const CASES = [
     mustNotInclude: [/aşağıda inceleyebilirsiniz:\s*İlgilendiğiniz/i],
   },
   {
+    name: 'Hepsine bakmak istiyorum → 28 ürün (tool limit tuzağı)',
+    history: [
+      { role: 'user', content: 'merhaba ürünlerinizi merak ediyorum' },
+      {
+        role: 'assistant',
+        content:
+          'Mağazamızda Afiş Çerçevesi ve Kaldırım Panosu kategorileri var. Hangisiyle ilgilenirsiniz?',
+      },
+    ],
+    q: 'hepsine bakmak istiyorum',
+    mustInclude: [/\[\[URUN_KARTLARI\]\]/i, /28/],
+    minProductSources: 20,
+    mustNotInclude: [/11 ürün|kriterinize uyan 11/i],
+  },
+  {
     name: 'Bütçe takip: panosu 5000 altı → Hayır (çerçeve kartı yok)',
     history: [
       { role: 'user', content: '500tl altı kaldırım panosu var mı' },

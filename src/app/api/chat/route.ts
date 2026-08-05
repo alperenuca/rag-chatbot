@@ -488,10 +488,18 @@ function isLikelyDirectCategoryBrowse(message: string, knownCategories: string[]
   return findMentionedCategories(message, knownCategories);
 }
 
-/** "Tüm ürünleri göster / katalogdaki her şey" */
+/** "Tüm ürünleri göster / katalogdaki her şey / hepsine bakmak istiyorum" */
 function wantsAllCatalogProducts(message: string): boolean {
-  return /(tüm\s*ürün|tum\s*urun|bütün\s*ürün|butun\s*urun|tüm\s*katalog|katalogdaki\s*her|hepsini\s*(göster|gör|listele|incele)|bütün\s*katalog|mağazadaki\s*tüm)/i.test(
-    message
+  const t = message.toLocaleLowerCase('tr-TR').trim();
+  if (
+    /^(hepsi|hepsine|hepsini|tümü|tumü|hepsine\s+bak(?:mak)?(?:\s+istiyorum)?)\s*[.!]?\s*$/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  return /(tüm\s*ürün|tum\s*urun|bütün\s*ürün|butun\s*urun|tüm\s*katalog|katalogdaki\s*her|hepsini\s*(göster|gör|göstermek|görmek|listele|incele|iste|istem)|hepsine\s*(bak|bakmak|göz|incele)|tümüne\s*(bak|bakmak|göz)|bütün\s*katalog|mağazadaki\s*tüm|ürünlerinizi\s*(görmek|incelemek)|hepsine\s*bakmak\s*ist)/i.test(
+    t
   );
 }
 
