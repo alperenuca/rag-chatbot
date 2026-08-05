@@ -1079,17 +1079,83 @@ function buildMultiColorCompareGuard(
   return `${lines.join('\n')}\n\n`;
 }
 
-/** Modele giden renk karşılaştırma metninden kullanıcıya sızdırılabilir satırları ayıkla. */
-function publicMultiColorCompareSummary(guardText: string): string {
-  return guardText
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(
-      (line) =>
-        line.startsWith('- ') &&
-        !/UYDURMA|sayısal hesapla|bilmiyorum DEME|KESİN/i.test(line)
-    )
-    .join('\n');
+function findDocByColor(
+  products: MatchedDocument[],
+  color: string
+): MatchedDocument | undefined {
+  const needle = color.toLocaleLowerCase('tr-TR');
+  return products.find((doc) => {
+    const raw = doc.metadata?.color;
+    return typeof raw === 'string' && raw.toLocaleLowerCase('tr-TR').includes(needle);
+  });
+}
+
+function capitalizeTr(value: string): string {
+  return value ? value.charAt(0).toLocaleUpperCase('tr-TR') + value.slice(1) : value;
+}
+
+/**
+ * Renk karşılaştırmasını doğrudan veriden yazar. Modelin ürettiği metin
+ * eksik kaldığında ya da iç talimat kalıplarını kopyaladığında bunu kullanıyoruz;
+ * kullanıcıya "filtre", "ölçü+renk" gibi iç ifadeler asla gitmesin.
+ */
+function buildColorCompareReply(
+  docs: MatchedDocument[],
+  colors: string[],
+  message: string,
+  dimension?: string
+): string {
+  if (colors.length < 2) return '';
+  const products = docs.filter((doc) => doc.metadata?.type === 'product');
+  const sizeLabel = dimension ? `${dimension} ölçüsünde ` : '';
+  const lines: string[] = [];
+  const prices: number[] = [];
+
+  // Kullanıcı hangi rengi önce yazdıysa cevapta da o sırayla görünsün
+  const text = message.toLocaleLowerCase('tr-TR');
+  const mentionIndex = (color: string) => {
+    const at = text.indexOf(color.toLocaleLowerCase('tr-TR'));
+    return at < 0 ? Number.MAX_SAFE_INTEGER : at;
+  };
+  const orderedColors = [...colors].sort((a, b) => mentionIndex(a) - mentionIndex(b));
+
+  for (const color of orderedColors) {
+    const label = capitalizeTr(color);
+    const match = findDocByColor(products, color);
+    if (!match) {
+      lines.push(
+        `- ${label}: kataloğumuzda ${sizeLabel}${color.toLocaleLowerCase('tr-TR')} model bulunmuyor.`
+      );
+      continue;
+    }
+    const title =
+      typeof match.metadata?.title === 'string' ? match.metadata.title : 'Ürün';
+    const price = match.metadata?.price;
+    const stock = match.metadata?.stock;
+    if (typeof price === 'number') prices.push(price);
+    const priceBit = typeof price === 'number' ? `${price} TL` : 'fiyat bilgisi yok';
+    const stockBit =
+      typeof stock === 'number'
+        ? stock > 0
+          ? `, stok ${stock}`
+          : ', şu an stokta yok'
+        : '';
+    lines.push(`- ${label}: ${title} — ${priceBit}${stockBit}`);
+  }
+  if (lines.length < 2) return '';
+
+  const diffLine =
+    prices.length >= 2
+      ? `\n\nFiyat farkı ${Math.max(...prices) - Math.min(...prices)} TL; daha ucuz olan ${Math.min(
+          ...prices
+        )} TL olan model.`
+      : '';
+  const intro = dimension
+    ? `${dimension} ölçüsünde renk karşılaştırması:`
+    : 'Renk karşılaştırması:';
+  return `${intro}\n\n${lines.join(
+    '\n'
+  )}${diffLine}\n\nHangi modeli daha yakından incelemek istersiniz?`;
 }
 
 /** Arama sonuçlarından kısa fiyat/stok özeti (modele + gerekirse yanıta). */
@@ -2654,6 +2720,9 @@ export async function POST(req: NextRequest) {
 
     let rawReply: string;
     let hasProductCards = false;
+    // Sunucuda üretilen karşılaştırma metinleri kart temizleyicisinden geçmemeli;
+    // aksi halde "- Kırmızı: ... 465 TL" gibi satırlar silinip cevap yarım kalıyor.
+    let bypassCardSanitize = false;
 
     // Takip detay sorusu: son konuşulan ürün kilidi aktifse tool çağırmadan
     // doğrudan o ürünün tam içeriğiyle cevap ver (kart listesi değil, metin detay).
@@ -3479,37 +3548,32 @@ export async function POST(req: NextRequest) {
         rawReply =
           `Evet, ${mm} mm profilli ürünümüz var${documents.some((d) => d.metadata?.stock === 0) ? ' (stok durumu aşağıda)' : ''}:\n\n${summary}\n\n${PRODUCT_CARDS_PLACEHOLDER}`.trim();
       }
-      // Model tek renge kayarsa / talimat sızdırırsa temiz karşılaştırma özetini ekle
-      if (colorCompareGuard && (messageFilters.colors?.length ?? 0) > 1) {
+      // Renk karşılaştırmasında model ya bir rengi atlıyor ya da iç talimat
+      // kalıplarını ("bu filtreyle", "ölçü+renk") kullanıcıya kopyalıyor;
+      // bu durumda cevabı tamamen veriden ürettiğimiz özetle değiştiriyoruz.
+      const requestedColors = messageFilters.colors ?? [];
+      if (colorCompareGuard && requestedColors.length > 1) {
         const leakedInstruction =
-          /(uydurma|sayısal hesapla|bu filtreyle ürün bulunamadı \(uydurma\))/i.test(
-            rawReply
-          );
-        const prices = documents
+          /(uydurma|sayısal hesapla|bu filtreyle|ölçü\s*\+\s*renk|ürün YOK)/i.test(rawReply);
+        const productPrices = documents
+          .filter((doc) => doc.metadata?.type === 'product')
           .map((doc) => doc.metadata?.price)
           .filter((price): price is number => typeof price === 'number');
-        const hasBothPrices =
-          prices.length >= 2 &&
-          prices.every((price) => rawReply.includes(String(price)));
-        const publicSummary = publicMultiColorCompareSummary(colorCompareGuard);
-        if (leakedInstruction || (!hasBothPrices && publicSummary)) {
-          // İç talimat sızmışsa ham cevabı temiz özetle değiştir/ekle
-          const cleaned = rawReply
-            .replace(/-?\s*siyah:.*?uydurma\)\.?/gi, '')
-            .replace(/Fiyat farkını sayısal hesapla[^\n]*/gi, '')
-            .replace(/\(uydurma\)/gi, '')
-            .replace(/\n{3,}/g, '\n\n')
-            .trim();
-          const nums = prices;
-          let diffLine = '';
-          if (nums.length >= 2) {
-            const hi = Math.max(...nums);
-            const lo = Math.min(...nums);
-            diffLine = `\nFiyat farkı: ${hi - lo} TL; daha ucuz olan ${lo} TL olan modeldir.`;
-          }
-          if (!hasBothPrices || leakedInstruction) {
-            rawReply = `${cleaned}\n\n${publicSummary}${diffLine}`.trim();
-          }
+        const allPricesShown =
+          productPrices.length > 0 &&
+          productPrices.every((price) => rawReply.includes(String(price)));
+        const missingColor = requestedColors.some(
+          (color) => !findDocByColor(documents, color)
+        );
+        const deterministicReply = buildColorCompareReply(
+          documents,
+          requestedColors,
+          message,
+          messageFilters.dimension
+        );
+        if (deterministicReply && (leakedInstruction || !allPricesShown || missingColor)) {
+          rawReply = deterministicReply;
+          bypassCardSanitize = true;
         }
       }
     } else if (directCategoryMatches.length > 0) {
@@ -3785,9 +3849,10 @@ export async function POST(req: NextRequest) {
     // Model yine de 1-2-3 ürün listesi yazarsa sunucuda temizle (kart + metin tekrarı olmasın).
     // Kullanıcı özellikle fiyat/stok istediyse kısa özet satırlarına izin ver.
     const allowPriceStockSummary = wantsInlinePriceStockSummary(message);
-    let reply = hasProductCards
-      ? sanitizeProductCardReply(replyWithPlaceholder, allowPriceStockSummary)
-      : replyWithPlaceholder;
+    let reply =
+      hasProductCards && !bypassCardSanitize
+        ? sanitizeProductCardReply(replyWithPlaceholder, allowPriceStockSummary)
+        : replyWithPlaceholder;
 
     // Sonuçtaki ürünlerin tamamı stok 0 iken model bunu söylemezse kullanıcı
     // durumu ancak kartta fark ediyor; cümleyi deterministik olarak ekliyoruz.

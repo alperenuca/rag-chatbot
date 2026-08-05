@@ -397,7 +397,11 @@ async function main() {
       } catch {
         /* raw */
       }
-      console.log(`HTTP ${res.status} | ${String(reply).replace(/\s+/g, ' ').slice(0, 320)}`);
+      console.log(
+        process.env.EVAL_VERBOSE === '1'
+          ? `HTTP ${res.status}\n${reply}`
+          : `HTTP ${res.status} | ${String(reply).replace(/\s+/g, ' ').slice(0, 320)}`
+      );
       const fails =
         res.status !== 200 ? [`HTTP ${res.status}`] : scoreReply(reply, testCase, sources);
       if (fails.length === 0) {
