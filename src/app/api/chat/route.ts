@@ -702,6 +702,31 @@ function collectProfileThicknessesMm(docs: MatchedDocument[]): number[] {
   return [...set].sort((a, b) => a - b);
 }
 
+/**
+ * Mesajda yeni bir arama kriteri (renk, ölçü, profil, bütçe) var mı?
+ * "A2 ölçüsünde var mı" gibi sorular son gösterilen ürünün takibi değil,
+ * kataloğa yapılan yeni bir aramadır.
+ */
+function hasNewSearchCriterion(message: string): boolean {
+  const filters = extractSearchFiltersFromMessage(message);
+  return (
+    filters.color != null ||
+    (filters.colors?.length ?? 0) > 0 ||
+    filters.dimension != null ||
+    filters.profile_thickness_mm != null ||
+    filters.max_price != null ||
+    filters.min_price != null
+  );
+}
+
+/** "var mı" / "göster" / "istiyorum" — katalogda arama isteği */
+function asksCatalogLookup(message: string): boolean {
+  const t = message.toLocaleLowerCase('tr-TR');
+  return /(var\s*mı|var\s*mi|varmı|mevcut\s*mu|bulunuyor\s*mu|bulunur\s*mu|göster|listele|istiyorum|arıyorum|olanlar|olan\s*var|hangi|neler)/i.test(
+    t
+  );
+}
+
 /** "hangi renkler var" / "renk seçenekleri neler" — tek ürün değil, katalog dökümü */
 function looksLikeColorCatalogQuestion(message: string): boolean {
   const t = message.toLocaleLowerCase('tr-TR');
@@ -1364,6 +1389,17 @@ function looksLikeProductFollowUp(message: string): boolean {
     'hakkında bilgi', 'detaylı bilgi', 'bilgi almak', 'detayını', 'detaylarını',
   ];
   if (referential.some((keyword) => normalized.includes(keyword))) return true;
+
+  // Yeni kriter + katalog isteği ("A2 ölçüsünde var mı", "32 mm olanları göster")
+  // yeni aramadır. Yeterlilik sorusu ("5311 elimde var, alabilir miyim?") ise
+  // kilitli ürünün fiyatına ihtiyaç duyduğu için takip sorusu kalmalı.
+  if (
+    !looksLikeAffordabilityQuestion(message) &&
+    hasNewSearchCriterion(message) &&
+    asksCatalogLookup(message)
+  ) {
+    return false;
+  }
 
   // Tekil ürün özelliği soruları (kısa): "ağırlığı ne", "indirimli fiyatı nedir"
   const propertyHints = [

@@ -319,6 +319,50 @@ const CASES = [
     maxProductSources: 3,
   },
   {
+    name: 'Ölçü takip: çerçeve sohbetinde A2 var mı (pin yok)',
+    history: [
+      { role: 'user', content: 'afiş çerçevesi' },
+      {
+        role: 'assistant',
+        content:
+          'Afiş çerçevesi kategorisinde toplam 27 ürün bulunmaktadır.\n\n[[URUN_KARTLARI]]',
+      },
+    ],
+    q: 'A2 ölçüsünde ürün var mı',
+    mustInclude: [/A2/i, /\[\[URUN_KARTLARI\]\]/i],
+    mustNotInclude: [/bulunmamaktadır|bulunmuyor|Poster Swing/i],
+    minProductSources: 1,
+  },
+  {
+    name: 'Profil takip: pano sohbetinde 32 mm göster (pin yok)',
+    history: [
+      { role: 'user', content: 'kaldırım panosu' },
+      {
+        role: 'assistant',
+        content:
+          'Kaldırım Panosu kategorisinde 1 ürün var: Ores Poster Swing - Su Depolu Kaldırım Reklam Panosu — 5310 TL.\n\n[[URUN_KARTLARI]]',
+      },
+    ],
+    q: '32 mm olanları göster',
+    mustInclude: [/32 mm/i, /\[\[URUN_KARTLARI\]\]/i],
+    mustNotInclude: [/bulunmamaktadır|Poster Swing/i],
+    minProductSources: 2,
+  },
+  {
+    name: 'Takip korunuyor: pano ağırlığı (yeni arama sanmasın)',
+    history: [
+      { role: 'user', content: 'kaldırım panosu' },
+      {
+        role: 'assistant',
+        content:
+          'Kaldırım Panosu kategorisinde 1 ürün var: Ores Poster Swing - Su Depolu Kaldırım Reklam Panosu — 5310 TL.\n\n[[URUN_KARTLARI]]',
+      },
+    ],
+    q: 'bu ürünün ağırlığı ne kadar',
+    mustInclude: [/16/, /Poster Swing/i],
+    maxProductSources: 1,
+  },
+  {
     name: 'Hangi renkler var: katalog renk dökümü',
     history: [
       { role: 'user', content: 'afiş çerçevesi' },
