@@ -1,6 +1,9 @@
 /**
  * Chat SSE: UI stream:true ister; eval/JSON varsayılan kalır.
  * event: status | meta | delta | done | error
+ *
+ * LLM yolları onDelta ile canlı token basar; deterministik cevaplar
+ * hazır olunca typewriter ile akar.
  */
 
 export type ChatStreamPayload = {
@@ -41,11 +44,11 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * SSE’yi hemen açar (status: thinking), JSON chat işi bitince typewriter + done.
- * Böylece uzun LLM beklerken bağlantı ve UI balonu canlı kalır.
+ * SSE’yi hemen açar. work(onDelta) içinde LLM token’ları canlı basılabilir.
+ * Hiç delta gelmezse (deterministik yol) cevap typewriter ile akar.
  */
 export function streamFromChatJsonWork(
-  work: () => Promise<Response>
+  work: (onDelta: (text: string) => void) => Promise<Response>
 ): Response {
   const encoder = new TextEncoder();
 
@@ -55,10 +58,17 @@ export function streamFromChatJsonWork(
         controller.enqueue(encoder.encode(encodeSseEvent(event, data)));
       };
 
+      let liveChars = 0;
+      const onDelta = (text: string) => {
+        if (!text) return;
+        liveChars += text.length;
+        send('delta', { text });
+      };
+
       try {
         send('status', { phase: 'thinking' });
 
-        const res = await work();
+        const res = await work(onDelta);
         let data: Record<string, unknown> = {};
         try {
           data = (await res.json()) as Record<string, unknown>;
@@ -92,12 +102,15 @@ export function streamFromChatJsonWork(
           conversationTitle: payload.conversationTitle,
         });
 
-        const chunks = chunkReplyForStream(payload.reply);
-        const delayMs =
-          chunks.length <= 12 ? 18 : chunks.length <= 28 ? 12 : 8;
-        for (const chunk of chunks) {
-          send('delta', { text: chunk });
-          await sleep(delayMs);
+        // Canlı LLM akışı yoksa (SQL/facts) hazır metni typewriter ile göster
+        if (liveChars === 0) {
+          const chunks = chunkReplyForStream(payload.reply);
+          const delayMs =
+            chunks.length <= 12 ? 18 : chunks.length <= 28 ? 12 : 8;
+          for (const chunk of chunks) {
+            send('delta', { text: chunk });
+            await sleep(delayMs);
+          }
         }
 
         send('done', payload);
@@ -111,19 +124,6 @@ export function streamFromChatJsonWork(
   });
 
   return new Response(stream, { headers: SSE_HEADERS });
-}
-
-/** @deprecated Tercihen streamFromChatJsonWork — hemen status gönderir */
-export function streamChatPayloadAsSSE(payload: ChatStreamPayload): Response {
-  return streamFromChatJsonWork(async () =>
-    Response.json({
-      reply: payload.reply,
-      sources: payload.sources,
-      citations: payload.citations,
-      conversationId: payload.conversationId,
-      conversationTitle: payload.conversationTitle,
-    })
-  );
 }
 
 export type ChatSseHandlers = {

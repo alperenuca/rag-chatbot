@@ -16,6 +16,41 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+/**
+ * UI stream’de onDelta verilirse OpenAI token’larını canlı basar;
+ * aksi halde tek seferde tamamlar (eval / JSON).
+ */
+async function streamOrCompleteChat(
+  params: {
+    model: string;
+    messages: ChatCompletionMessageParam[];
+    temperature?: number;
+  },
+  onDelta?: (text: string) => void
+): Promise<string> {
+  if (!onDelta) {
+    const completion = await openai.chat.completions.create({
+      ...params,
+      stream: false,
+    });
+    return completion.choices[0]?.message?.content ?? '';
+  }
+
+  const stream = await openai.chat.completions.create({
+    ...params,
+    stream: true,
+  });
+  let full = '';
+  for await (const chunk of stream) {
+    const piece = chunk.choices[0]?.delta?.content ?? '';
+    if (piece) {
+      full += piece;
+      onDelta(piece);
+    }
+  }
+  return full;
+}
+
 interface HistoryTurn {
   role: 'user' | 'assistant';
   content: string;
@@ -3357,18 +3392,19 @@ function buildSystemPrompt(params: BuildSystemPromptParams): string {
 
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as Record<string, unknown>;
-  // UI stream:true → SSE hemen açılır; iş bitince typewriter.
+  // UI stream:true → SSE hemen + LLM token’ları canlı; deterministikte typewriter.
   // Eval / eski istemci stream göndermez → JSON.
   if (body?.stream === true) {
-    return streamFromChatJsonWork(() =>
-      processChatRequest({ ...body, stream: false })
+    return streamFromChatJsonWork((onDelta) =>
+      processChatRequest({ ...body, stream: false }, onDelta)
     );
   }
   return processChatRequest(body);
 }
 
 async function processChatRequest(
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  onDelta?: (text: string) => void
 ): Promise<NextResponse> {
   try {
     const { message, conversationId, history } = body;
@@ -3692,29 +3728,30 @@ async function processChatRequest(
         ? `DETAY + KART (KESİN): Kısa giriş, sonra [[URUN_KARTLARI]], ardından Kural 3 sırasıyla özellikler → fiyat/stok → uzun açıklama. "Aşağıda" deyip kart/yer tutucu unutma. Stok 0 olsa bile kartı göster ("Stokta yok").\n\n`
         : 'DETAY FORMATI (KESİN): Önce **Ürün Özellikleri** (madde madde), sonra **Fiyat/Stok**, en sonda uzun açıklama. "Aşağıda inceleyebilirsiniz" deyip boş bırakma — metinde özellikleri yaz. Uzun metni başa yazma.\n\n';
 
-      const followUpCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${propertyGuard}${detailOrderGuard}${followUpDerived.contextText}`,
-              hasProductCards,
-              isAmbiguousGenericQuery: false,
-              toolActive: hasProductCards,
-              pinnedFollowUpProduct: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-
-      rawReply = followUpCompletion.choices[0].message.content ?? '';
+      rawReply = await streamOrCompleteChat(
+        {
+          model: 'gpt-4o-mini',
+          messages: [
+            {
+              role: 'system',
+              content: buildSystemPrompt({
+                knownCategoriesText,
+                contextText: `${propertyGuard}${detailOrderGuard}${followUpDerived.contextText}`,
+                hasProductCards,
+                isAmbiguousGenericQuery: false,
+                toolActive: hasProductCards,
+                pinnedFollowUpProduct: true,
+                userMessage: message,
+                extraContextPrefix: shippingCartPrefix,
+              }),
+            },
+            ...historyMessages,
+            { role: 'user', content: message },
+          ],
+          temperature: 0.2,
+        },
+        onDelta
+      );
       if (propertyGuard) {
         const mmMatch = propertyGuard.match(/profil kalınlığı (\d+(?:\.\d+)?) mm/i);
         const mm = mmMatch?.[1];
@@ -4105,28 +4142,29 @@ async function processChatRequest(
             ].join('\n')
           : 'İndirimli ürün bulunamadı; yine de genel kuralı söyle: indirimdeki ürünler iade edilemez.\n\n';
 
-      const discRetCompletion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: buildSystemPrompt({
-              knownCategoriesText,
-              contextText: `${discRetGuard}${discRetDerived.contextText}`,
-              hasProductCards: discRetDerived.hasProductCards,
-              isAmbiguousGenericQuery: discRetDerived.isAmbiguousGenericQuery,
-              toolActive: true,
-              userMessage: message,
-              extraContextPrefix: shippingCartPrefix,
-            }),
-          },
-          ...historyMessages,
-          { role: 'user', content: message },
-        ],
-        temperature: 0.2,
-      });
-
-      rawReply = discRetCompletion.choices[0].message.content ?? '';
+      rawReply = await streamOrCompleteChat(
+        {
+          model: 'gpt-4o-mini',
+          messages: [
+            {
+              role: 'system',
+              content: buildSystemPrompt({
+                knownCategoriesText,
+                contextText: `${discRetGuard}${discRetDerived.contextText}`,
+                hasProductCards: discRetDerived.hasProductCards,
+                isAmbiguousGenericQuery: discRetDerived.isAmbiguousGenericQuery,
+                toolActive: true,
+                userMessage: message,
+                extraContextPrefix: shippingCartPrefix,
+              }),
+            },
+            ...historyMessages,
+            { role: 'user', content: message },
+          ],
+          temperature: 0.2,
+        },
+        onDelta
+      );
       if (
         documents.length > 0 &&
         typeof discRetList === 'number' &&
