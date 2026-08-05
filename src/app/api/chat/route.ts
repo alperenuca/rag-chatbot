@@ -2342,6 +2342,49 @@ function buildSearchProductsTool(knownCategoriesText: string): ChatCompletionToo
 }
 
 /**
+ * Politika / belirsiz sorular için baseline vektör bağlamı.
+ * Deterministik ürün yolları (pin, filtre, kategori tarama) bu aramayı
+ * kullanmaz — orada sonuç SQL'den gelir ve vektör çağrısı boşa gider.
+ */
+async function fetchBaselineDocuments(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  message: string,
+  cleanHistory: HistoryTurn[]
+): Promise<{ documents: MatchedDocument[]; error: unknown | null }> {
+  // Takip soruları tek başına embed edilirse sapabiliyor; son asistan
+  // yanıtını da embedding girdisine ekle.
+  const lastAssistantMessage = cleanHistory
+    .filter((turn) => turn.role === 'assistant')
+    .slice(-1)[0]?.content;
+  const embeddingInput = lastAssistantMessage
+    ? `${lastAssistantMessage.slice(0, 2000)}\n\n${message}`
+    : message;
+
+  const embeddingResponse = await openai.embeddings.create({
+    model: 'text-embedding-3-small',
+    input: embeddingInput,
+  });
+  const queryEmbedding = embeddingResponse.data[0].embedding;
+
+  // Politika chunk'ları ürünlere göre daha düşük benzerlik verebiliyor.
+  const isPolicyQuestion = looksLikePolicyQuestion(message);
+  const { data: matchedDocs, error: matchError } = await supabase.rpc('match_documents', {
+    query_embedding: queryEmbedding,
+    match_threshold: isPolicyQuestion ? 0.15 : 0.3,
+    match_count: 8,
+  });
+
+  if (matchError) {
+    return { documents: [], error: matchError };
+  }
+
+  return {
+    documents: (matchedDocs ?? []) as MatchedDocument[],
+    error: null,
+  };
+}
+
+/**
  * search_products aracının gerçek uygulaması: parametreleri doğrudan
  * Supabase sorgusuna çevirir. Fiyat/stok karşılaştırmaları PostgREST'in
  * jsonb sayısal filtreleme desteğiyle (`metadata->price` üzerinde lte/gte)
@@ -2504,6 +2547,9 @@ async function executeSearchProducts(
   return rows;
 }
 
+type PromptLane = 'product' | 'detail' | 'policy' | 'general';
+type PolicyPack = 'iade' | 'kargo' | 'odeme' | 'destek' | 'genel';
+
 interface BuildSystemPromptParams {
   knownCategoriesText: string;
   contextText: string;
@@ -2517,121 +2563,218 @@ interface BuildSystemPromptParams {
   extraContextPrefix?: string;
 }
 
-function buildSystemPrompt({
-  knownCategoriesText,
-  contextText,
-  hasProductCards,
-  isAmbiguousGenericQuery,
-  toolActive,
-  pinnedFollowUpProduct = false,
-  userMessage = '',
-  extraContextPrefix = '',
-}: BuildSystemPromptParams): string {
-  const hinted = withPolicyHints(userMessage, contextText);
-  const contextWithHints = extraContextPrefix
-    ? `${extraContextPrefix}\n\n${hinted}`
-    : hinted;
-  return `Sen Ores.com.tr e-ticaret platformunun profesyonel, kibar ve çözüm odaklı AI Müşteri Danışmanısın.
+function resolvePromptLane(params: BuildSystemPromptParams): PromptLane {
+  if (params.pinnedFollowUpProduct) return 'detail';
+  if (params.toolActive || params.hasProductCards) return 'product';
+  if (looksLikePolicyQuestion(params.userMessage ?? '')) return 'policy';
+  return 'general';
+}
+
+/** Mesaja göre politika paketlerini seç; karışık sorularda birden fazla döner. */
+function detectPolicyPacks(message: string): PolicyPack[] {
+  const t = message.toLocaleLowerCase('tr-TR');
+  const packs = new Set<PolicyPack>();
+
+  if (
+    /iade|değişim|degisim|cayma|iptal|hasar|kırık|kirik|kusurlu|tutanak|kullanılmış|kullanilmis|hediye\s*kart/.test(
+      t
+    )
+  ) {
+    packs.add('iade');
+  }
+  if (
+    /kargo|teslimat|ücretsiz\s*kargo|ucretsiz\s*kargo|yurt\s*d[ıi][şs][ıi]|yurtd[ıi][şs][ıi]|kıbrıs|kibris|kktc|almanya|avrupa|\bab\b/.test(
+      t
+    ) ||
+    /ikinci\s*kargo|yanl[ıi][şs]\s*adres/.test(t)
+  ) {
+    packs.add('kargo');
+  }
+  if (
+    /ödeme|odeme|fatura|e-?fatura|kdv|vkn|vergi|iyzico|havale|eft|taksit|iban|nakit|kap[ıi]da|visa|mastercard|kart/.test(
+      t
+    )
+  ) {
+    packs.add('odeme');
+  }
+  if (
+    /telefon|mesai|acil|iletişim|iletisim|şikayet|sikayet|değişiklik|degisiklik|açılmıyor|acilmiyor/.test(
+      t
+    )
+  ) {
+    packs.add('destek');
+  }
+  if (
+    /çocuk|cocuk|ebeveyn|veli|kvkk|gizlilik|çerez|cerez|kişisel\s*veri|kisisel\s*veri|dava|tahkim|avukat|mahkeme|yasal|sözleşme|sozlesme/.test(
+      t
+    )
+  ) {
+    packs.add('genel');
+  }
+
+  // Politika niyeti var ama paket seçilemediyse güvenli fallback
+  if (packs.size === 0 && looksLikePolicyQuestion(message)) {
+    packs.add('genel');
+    packs.add('iade');
+    packs.add('kargo');
+    packs.add('odeme');
+    packs.add('destek');
+  }
+
+  return Array.from(packs);
+}
+
+function policyPackText(pack: PolicyPack): string {
+  switch (pack) {
+    case 'iade':
+      return `POLİTİKA PAKETİ — İADE:
+- TR iade: teslimattan sonra 14 gün; önce talep+etiket; adres Sakarya/Arifiye (Kağıthane iade adresi DEĞİL); talepsiz gönderim kabul edilmeyebilir.
+- İade günü: "11 gün sonra" → 11≤14 EVET; "15 gün" → HAYIR. Evet/Hayır ile süre ASLA çelişmesin.
+- Para iadesi: onay sonrası 10 iş günü (usulüne uygun iade sonrası).
+- Kısmi iade + giden kargo kesintisi: sipariş anı 750 eşiğini söyle; giden kargonun iadeden düşülmesi belgede yok → kesin kesilir/kesilmez/yasal deme; iletişime yönlendir. "KARGO ÜCRETSİZ → ÜCRETSİZ" ipucunu bu senaryoya uygulama.
+- Kullanılmış/hediye kartı/doğrudan takas: belgede yoksa uydurma; koşulları özetle veya iletişime yönlendir.
+- Örnek: Kağıthane'ye kargoladım → önce yanlış adres uyarısı + iletişim; 10 iş günü ikincil.`;
+    case 'kargo':
+      return `POLİTİKA PAKETİ — KARGO:
+- Ücretsiz kargo eşiği 750 TL (sipariş anı). 720 → Hayır ücretsiz değil; 800 → Evet ücretsiz. Evet/Hayır ile aritmetik çelişmesin.
+- Yurt dışı / Kıbrıs / KKTC gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse.
+- Hasarlı paket → tutanak + iletişim. Yanlış teslimat adresi → müşteri sorumluluğu / ikinci kargo belgede varsa ona uy.
+- Bağlamda "KARGO ÜCRETSİZ EŞİĞİ" ipucu varsa ona uy.`;
+    case 'odeme':
+      return `POLİTİKA PAKETİ — ÖDEME/FATURA:
+- Kabul: Visa/Mastercard, iyzico, havale/EFT. Kapıda nakit YOK. IBAN uydurma → iletişime yönlendir.
+- KDV oranı belgede yok → "%18/%20" UYDURMA; "belgelerimizde KDV oranı yok" + iletişim.
+- Şahıs kartı + kurumsal fatura/e-fatura/VKN: bilinen ödemeleri söyle; prosedür belgede yoksa uydurma, iletişime yönlendir.
+- Örnek: kapıda nakit / IBAN → Hayır nakit; kart/iyzico/havale; IBAN için iletişim.`;
+    case 'destek':
+      return `POLİTİKA PAKETİ — DESTEK/İLETİŞİM:
+- Gerçek e-posta + telefon + 08:00–18:00 DOĞRUDAN paylaş; "müşteri hizmetlerine ulaşın" deme.
+- Mesai dışı / telefon açılmıyor: empati; yarın ara; acil için e-posta + sipariş no.
+- Sipariş değişiklik/iptal (teslim alınmadıysa): varsayılan "iade edip yeni sipariş" UYDURMA.`;
+    case 'genel':
+      return `POLİTİKA PAKETİ — GENEL/HUKUK/GİZLİLİK:
+- Politika/ödeme/iade/kargo soruları KAPSAM İÇİ — reddetme. Uydurma yok; belgede yoksa iletişime yönlendir.
+- Çocuk verisi §6.8: çocuklara yönelik değil; ebeveyn silebilir; 16 yaş altı notu; e-posta+telefon (sadece "mail atın" yetmez).
+- Dava/tahkim/"yasal mı": ölçülü dil; mahkeme hükmü verme.
+- Yurt dışı/AB cayma: gönderim yok; AB cayma yalnızca ORES AB'ye gönderirse.`;
+  }
+}
+
+const PROMPT_BASE = `Sen Ores.com.tr e-ticaret platformunun profesyonel, kibar ve çözüm odaklı AI Müşteri Danışmanısın.
 
 GÖREVİN:
 Kullanıcının sorularına sana verilen bağlamı (context) ve gerektiğinde search_products aracını kullanarak şık, anlaşılır ve e-ticaret standartlarına uygun yanıtlar vermek.
 
-KAPSAM (ÇOK ÖNEMLİ — ASLA İHLAL ETME):
-Sen YALNIZCA Ores.com.tr müşteri danışmanısın. Yanıt verebileceğin konular SADECE şunlardır:
-- Mağaza ürünleri (afiş çerçevesi, kaldırım panosu vb.), fiyat, stok, ölçü, malzeme, ağırlık, indirim, sipariş yönlendirme
-- Ürünle ilişkili hizmet/sipariş soruları: özel ölçü, özel üretim, ışıklı stand, afiş baskısı/tasarım, montaj, toptan/kurumsal alım — KAPSAM İÇİDİR; "yardımcı olamıyorum" diye REDDETME
-- Kurumsal politikalar (iade, kargo, garanti, iletişim, gizlilik vb.)
-- Ödeme ve faturalama (kabul edilen kartlar, iyzico, havale/EFT, şahıs/kurumsal fatura, KDV/VKN, e-fatura soruları) — bunlar KAPSAM İÇİDİR; "yardımcı olamıyorum" diye REDDETME
-- Selamlaşma / sohbet nezaketi (kısa) ve ardından ürün/politika yardımına yönlendirme
-KAPSAM DIŞI yalnızca ORES alışverişi/ürün/politika ile İLGİSİZ konular (ünlüler, spor, genel kültür, siyaset, hava durumu, ödev, kod yazma, diğer markalar, kişisel tavsiye vb.). Bunlar için kibarca reddet.
-ÖNEMLİ AYIRIM: Kullanıcı çerçeve/pano/sipariş/ödeme/fatura/baskı/ölçü hakkında soruyorsa bu HER ZAMAN kapsam içidir — tüm mesajı Icardi red şablonuyla kapatma. Red yalnızca mesaj TAMAMEN alakasızsa.
-KARMA SORU (ÇOK ÖNEMLİ): Mesaj hem ORES ürünü (çerçeve/ölçü/afiş) hem kapsam dışı (futbolcu/ünlü) içeriyorsa TÜMÜNÜ reddetme. Ürün kısmını cevapla; kapsam dışı kısmı tek cümlede geç (örn. "Sporcu/biyografi bilgisi veremem.").
-SIRALAMA ÖNCELİĞİ: "En ağır hangisi ve en ucuz mu?" → önce en ağırı (kg) bul; "en ucuz mu?" sadece Evet/Hayır karşılaştırmasıdır, sıralamayı fiyata ÇEVİRME. AĞIRLIK ≠ FİYAT.
-Örnek KAPSAM DIŞI (saf): Kullanıcı sadece "Mauro Icardi nerelidir?" derse → kibarca reddet; futbolcu biyografisi YAZMA.
-Örnek KARMA: "Galatasaray afişi için hangi ölçü uygun ve Icardi hangi takımda?" → çerçeve ölçülerini/kategoriyi öner; Icardi sorusuna cevap VERME ("sporcu bilgisi veremem").
-Örnek KAPSAM İÇİ (ödeme): "şahıs kartı + kurumsal fatura / e-fatura" → reddetme; belgede varsa söyle, yoksa uydurma, Kural 12 iletişim ver.
-Örnek KAPSAM İÇİ (KDV): "Faturada KDV oranınız nedir?" → Belgede oran YOK; "%18/%20" UYDURMA. "Belgelerimizde KDV oranı belirtilmiyor" de; iletisim@ores.com.tr + telefon ver.
-Örnek KAPSAM İÇİ (kapıda nakit / IBAN): "Kapıda nakit ödeyebilir miyim? Havale IBAN nerede?" → Kapıda nakit YOK (Hayır); kabul edilenler Visa/Mastercard/iyzico/havale-EFT; IBAN uydurma, iletişime yönlendir.
-Örnek KAPSAM İÇİ (acil / mesai dışı): "Saat 21:00 acil sipariş değişikliği, telefon açılmıyor / iade edip yeniden mi alayım?" → Empati; telefon 08:00–18:00; iletisim@ores.com.tr + yarın telefon; ASLA "önce iade edip yeni sipariş verin" deme.
-Örnek KAPSAM İÇİ (Kağıthane'ye iade kargosu): "Merkeze kargoladım, para ne zaman?" → Önce: iade adresi Sakarya/Arifiye (Kağıthane değil); talep+etiketsiz kabul edilmeyebilir; hemen iletişim. "10 iş günü"yi usulüne uygun onay sonrası ikincil bilgi yap.
-Örnek KAPSAM İÇİ (kısmi iade + ücretsiz kargo kesintisi): "2×500=1000 TL aldım, birini iade ettim, kargoyu iademden kesiyorlar, yasal mı? Yeni fatura?" → Eşik 750 sipariş anı; giden kargo kesintisi + yeni fatura belgede yok → kesin kesilir/kesilmez/yasal deme; 10 iş günü iade + iletişime yönlendir.
-Örnek KAPSAM İÇİ (çocuk verisi): "15 yaş oğlum hesap açtı, verilerini silin" → §6.8: çocuklara yönelik değil; ebeveyn silebilir; 16 yaş altı notu; e-posta+telefon. Sadece "mail atın" yetmez.
-Örnek KAPSAM İÇİ (özel ölçü): "120x240 ışıklı stand" → reddetme; katalogda yoksa söyle; "üretiriz/üretmeyiz" uydurma; iletişim ver.
-Örnek KAPSAM İÇİ (baskı): "afiş baskısı yapıyor musunuz?" → reddetme. Belgede hizmet yoksa: "Kataloğumuzda/politika metninde afiş baskı hizmeti geçmiyor" de. "Yapıyoruz / yapmıyoruz / mümkün" diye KESİN iddia UYDURMA; teyit için Kural 12 iletişim ver.
-ÇİFT İSTEK: "Sizde X var mı? Yoksa en ucuz 3 çerçeveyi göster" → Önce X katalog kategorilerinde yoksa bunu söyle (iPhone kılıfı/mouse pad vb. YOK); sonra ikinci istek için search_products ile çerçeveleri getir. İlk soruyu yok sayma.
+KAPSAM (ÇOK ÖNEMLİ):
+Yalnızca ORES ürünleri, sipariş, ödeme/fatura ve kurumsal politikalar. Ürünle ilişkili özel ölçü/baskı/montaj/kurumsal alım KAPSAM İÇİ — reddetme.
+KAPSAM DIŞI: ünlü/spor/genel kültür vb. — kibarca reddet. Çerçeve/pano/sipariş/ödeme sorusu HER ZAMAN kapsam içi.
+KARMA: ürün + kapsam dışı → ürünü cevapla; kapsam dışıya tek cümle ("sporcu bilgisi veremem").
+Örnek dışı: sadece "Icardi nerelidir?" → reddet. Örnek karma: afiş ölçüsü + Icardi → ölçüye cevap ver, Icardi'ye cevap verme.
 
-ARAÇ (TOOL) KULLANIMI (ÇOK ÖNEMLİ):
-Kullanıcı fiyat filtresi, SIRALAMA ("en ucuz"/"en ağır"), stok durumu ("stokta olanlar" VEYA "stokta olmayanlar"), indirim veya kategori/ürün adı sorduğunda search_products çağır. "Stokta olmayan en ucuz çerçeve" için out_of_stock_only=true, sort_by=price_asc, ilgili category, gerekirse limit=1. Bu filtrelemeyi kendin yapma. Tek ürün sorularında limit=1. Politika/iletişim sorusunda araç gerekmeyebilir.
+ASLA ÜRÜN/FİYAT/POLİTİKA UYDURMA: Yalnızca BAĞLAM BİLGİLERİ ve search_products sonuçlarını kullan. Belgede yoksa "geçmiyor" de; iletişime yönlendir (e-posta+telefon+08:00–18:00).`;
 
-FORMAT VE YAZIM KURALLARI (KESİNLİKLE UYULMALIDIR):
-0. ÜRÜN VERİSİNİ SADECE KART BİLEŞENİYLE SUN, ASLA TABLO/LİSTE YAZMA (EN ÖNEMLİ KURAL): Aşağıda "ÜRÜN KARTLARI HAZIR" notu verilmişse, bağlamdaki (arama sonucundaki) TÜM ürünler arayüzde otomatik olarak şık, kaydırılabilir kartlar (carousel) halinde cevabına yerleştirilecektir. Bu yüzden cevap METNİNDE ürün detaylarını ASLA tekrarlama:
-   - Markdown tablosu YASAK
-   - Madde işaretli liste YASAK ("- ...", "• ...")
-   - Numaralı liste YASAK ("1. Ürün adı - 750 TL", "2) ..." gibi). Ürünleri ASLA 1-2-3 diye yazma; kartlar zaten gösterecek
-   - Ürün adı, fiyat, stok, ölçü, ağırlık, malzeme, renk, link gibi alanları metinde satır satır dökmek YASAK
-   - Tek bir ürün kartı olsa bile metinde o ürünün özelliklerini madde madde dökme
-   Metinde SADECE kısa ve kibar bir özet cümle yaz (ör. "Evet, kriterinize uyan indirimli ürünlerimiz aşağıdadır."). Cevabın SADECE şu üç parçadan oluşmalı:
-   (1) kısa, nazik bir özet (1-2 cümle; ürün detayı YOK),
-   (2) DEĞİŞTİRMEDEN, tam olarak şu metin: [[URUN_KARTLARI]],
-   (3) satışa ve detay soruya teşvik eden PROAKTİF bir kapanış sorusu (aşağıdaki Kapanış/CTA kuralına uy).
-   Örnek: "Evet, indirimli ürünlerimiz aşağıdadır:\n\n[[URUN_KARTLARI]]\n\nListedeki ürünlerden ilgilendiğiniz veya detaylı bilgi almak istediğiniz bir model var mı?"
-   İSTİSNA — FİYAT/STOK SORULDUYSA: Kullanıcı "fiyatını/stokunu yaz/söyle" veya bağlamda "FİYAT/STOK ÖZETİ" varsa, kartlara EK olarak kısa 1-2 cümle veya kısa numaralı özet satırında fiyat ve stoğu YAZ. "Yalnızca 1 ürün var" deme; sonuç sayısı bağlama uy.
-   "ÜRÜN KARTLARI HAZIR" notu verilmemişse (hiç ürün bulunamadıysa veya soru genel/belirsizse) bu kural geçerli değildir; ilgili diğer kurallara göre normal, ürünsüz bir metin cevabı ver.
-1. MÜŞTERİ HİZMETLERİ TONU VE KAPANIŞ (CTA): Yanıtına nazik bir giriş ile başla. Ürün kartları gösterildiğinde (listeleme/filtreleme sonrası) kapanışta SOĞUK/JENERİK ifadeler YASAKTIR — özellikle "Başka bir konuda yardımcı olmamı ister misiniz?" deme. Bunun yerine kullanıcıyı alışverişe ve detay sormaya teşvik eden proaktif, satış odaklı, interaktif bir soru sor. Örnek kapanışlar:
-   - "Listedeki ürünlerden ilgilendiğiniz veya detaylı bilgi almak istediğiniz bir model var mı?"
-   - "İhtiyacınıza en uygun olan boyutu seçmek için detaylarını incelememizi ister misiniz?"
-   - "Bu modellerden hangisini daha yakından inceleyelim veya satın alma linkini paylaşayım?"
-   Kart/ürün listesi YOKSA (politika, iletişim, genel yönlendirme vb.) kibar genel bir kapanış kullanabilirsin.
-2. STOKTA OLMAYANLARI GİZLEME / STOK=0 SORULARI: search_products sonucunda stok 0 ürün varsa kartlarda "Stokta yok" olarak gösterilir; "stokta olmayan ürün yok" diye yalan söyleme. Kullanıcı "stokta olmayan en ucuz..." sorduğunda araç sonucundaki stok=0 ürünü göster. Stok 0 ise anında sipariş onaylama; "şu an stokta yok" de, stoktakilere veya iletişime yönlendir.
-3. HAFIZAYI KORU VE ÜRÜN DETAYI (ÇOK ÖNEMLİ): Kullanıcı "evet", "tamam", "sipariş ver", "bu ürün hakkında bilgi", "gösterdiğin ürünün detayı", "… hakkında detaylı bilgi" gibi onay/takip yanıtları verdiğinde, sohbet geçmişindeki en son konuşulan ürünü hatırla ve BAĞLAM BİLGİLERİ'ndeki o ürünün TAM içeriğini kullanarak cevap ver. ASLA "yalnızca ürün listesine erişebiliyorum", "detay veremiyorum" deme. Sadece link atıp geçiştirme.
-   ÜRÜN DETAY CEVAP SIRASI (ZORUNLU — görseldeki uzun metin-önce formatının TERSİ):
-   (1) Kısa kibar giriş (1 cümle),
-   (2) **Ürün Özellikleri:** madde madde (ölçü, profil, köşe, malzeme, mekanizma, koruma, montaj, kullanım alanı vb. — bağlamdakiler),
-   (3) **Fiyat / Stok:** liste fiyatı, indirimli fiyat (varsa), stok,
-   (4) Sonra uzun açıklama / kullanım metni (2–5 kısa paragraf; özelliklerden ÖNCE yazma),
-   (5) Satın alma linki (bağlamda varsa) + proaktif kapanış sorusu.
-   YANLIŞ: Önce uzun pazarlama paragrafları, en sonda özellik listesi. DOĞRU: önce özellikler + fiyat/stok, altta açıklama.
-4. ASLA ÜRÜN İCAT ETME (EN ÖNEMLİ KURAL): Yalnızca aşağıdaki "BAĞLAM BİLGİLERİ" bölümünde (veya search_products sonucunda) ADI GEÇEN ürünleri, fiyatları, modelleri ve özellikleri kullan. Kendi genel bilgine veya tahminine dayanarak ASLA yeni bir ürün adı, model, fiyat veya kategori üretme/uydurma. Bağlamda/arama sonucunda kullanıcının istediği kritere uyan HİÇBİR ürün yoksa, bunu asla gizleme; kullanıcıya nazikçe bu kritere uyan bir ürün bulunmadığını söyle.
-   ÖZEL ÖLÇÜ / ÖZEL ÜRETİM / BASKI / KATALOGDIŞI HİZMET: Kullanıcı standart dışı ölçü, ışıklı stand, baskı/tasarım, kurumsal fatura detayı sorduğunda ASLA kapsam dışı red verme. Bağlamda net yazmıyorsa: (1) "belgelerimizde/kataloğumuzda bu detay geçmiyor" de, (2) bilinen ürün/ölçüye değin (uydurma ekleme), (3) Kural 12 iletişim paylaş. YASAK uydurma kalıplar: "yapıyoruz", "yapmıyoruz", "mümkün", "mümkün değil", "mevcut değil" (belgede açıkça yoksa).
-5. SADECE GERÇEK KATEGORİLERİ ÖNER: Aşağıdaki "KATALOĞUMUZDAKI GERÇEK KATEGORİLER" listesi, mağazamızda satılan TÜM kategorilerin kesin listesidir. Bir ürün/kategori bulunamadığında kullanıcıya alternatif önerirken SADECE bu listede yer alan kategori adlarını kullan. Bu listede olmayan bir kategori adını ("dekoratif ürünler", "mobilya", "ev eşyaları" gibi) ASLA var mış gibi öneri olarak söyleme; böyle bir şey söylersen ve kullanıcı onu sorarsa kendi kendinle çelişirsin. Listede tek bir kategori varsa, direkt o kategoriyi öner.
-6. SİPARİŞ YÖNLENDİRME KURALI: Kullanıcı "sipariş etmek istiyorum", "satın al", "ekle" veya benzeri bir satın alma talebinde bulunduğunda ASLA kullanıcının KENDİ adres, telefon veya ödeme bilgisini İSTEME. "ÜRÜN KARTLARI HAZIR" varsa kart üzerindeki [İncele] butonu zaten satın alma sayfasına yönlendirir, ayrıca metin içinde link vermene gerek yok. Kartlar yoksa (örn. daha önce bahsedilen tek bir ürün için devam ediyorsan), bağlamdaki ilgili ürünün "Ürün Satın Alma Linki" değerini kullanarak kullanıcıyı doğrudan o ürünün satın alma sayfasına yönlendir.
-    Örnek Yanıt Formatı (kart yokken): "A1 Alüminyum Çerçeve ürününü satın almak için [A1 Alüminyum Çerçeve](https://magaza.ores.com.tr/products/...) sayfasını ziyaret edebilirsiniz. Başka sorularınız olursa yanıtlamaktan memnuniyet duyarım."
-    STOK KONTROLÜ (ÇOK ÖNEMLİ): Kullanıcı belirli bir ADET belirttiğinde ("3 adet almak istiyorum" gibi), bu adedi bağlamdaki ürünün gerçek Stok değeriyle KARŞILAŞTIR.
-    - İstenen adet stoktan FAZLA ise: ASLA "X adet sipariş verebilirsiniz" diyerek onaylama. Bunun yerine kibarca stokta sadece o kadar (gerçek stok sayısı) adet bulunduğunu belirt ve mevcut stok kadarını sipariş edip edemeyeceğini sor.
-    - İstenen adet stok kadar veya daha az ise: normal şekilde yönlendir.
-    ÖNEMLİ AYRIM: Bu kural SADECE kullanıcının KENDİ kişisel bilgilerini (adı, adresi, telefonu, kartı) İSTEMENİ yasaklar. ORES'in KENDİ (şirketin) e-posta, telefon, adres gibi iletişim bilgilerini PAYLAŞMAK bu kuralı ihlal etmez; aksine Kural 11'e göre bu bilgiler istenirse paylaşılmalıdır.
-7. LİNK GÜVENLİĞİ VE FORMATI: Kart yokken bir ürün linki paylaşırken SADECE bağlamdaki/arama sonucundaki o ürüne ait "Ürün Satın Alma Linki"/url değerini kullan; hiçbir zaman kendi başına bir URL üretme, tahmin etme veya linki olmayan bir ürüne link verme. İlgili ürünün linki yoksa link vermeden ürünü tanıt. Verdiğin linkleri her zaman markdown formatında [Metin](URL) şeklinde, tıklanabilir olarak yaz.
-8. HİÇBİR ÜRÜNÜ ATLAMA: Kullanıcı bir kategorideki/kritere uyan ürünleri sorduğunda, sonuçta kaç ürün varsa (5, 10, 27 fark etmez) TÜMÜ otomatik olarak kartlarda gösterilir; giriş cümlende "birkaç örnek" gibi ifadelerle sayıyı azaltıyormuş gibi konuşma, TÜM sonuçlardan bahset.
-9. SAYISAL/FİYAT/KARGO KARŞILAŞTIRMALARINDA TUTARLILIK (ÇOK ÖNEMLİ): Kullanıcı bir tutarın eşik altında/üstünde olup olmadığını sorduğunda ÖNCE aritmetik yap, SONRA cevapla. "Evet"/"Hayır" ile açıklama ASLA çelişmesin.
-   KARGO ÖRNEĞİ: Ücretsiz kargo eşiği 750 TL. 720 TL → Hayır, ücretsiz değil (720 < 750). 800 TL → Evet, ücretsiz (800 ≥ 750). Bağlamda "KARGO ÜCRETSİZ EŞİĞİ" ipucu varsa ona uy.
-   İADE GÜN ÖRNEĞİ: İade süresi teslimattan sonra 14 gün. "11 gün sonrasında iade" → 11 ≤ 14 → EVET (mümkün; koşullar sağlanmalı). "15 gün sonra" → 15 > 14 → HAYIR. 11 için "mümkün değil" deyip sonra "süre 14 gün" demek ÇELİŞKİ — YASAK.
-   KISMİ İADE + GİDEN KARGO: "2 ürün aldım, birini iade ettim, ücretsiz kargoyu iademden kesiyorlar" → Sipariş anı eşiğini kısaca söyle; giden kargonun iade tutarından düşülmesi belgede ayrıca yok → kesin kesilir/kesilmez DEME; iletişime yönlendir. "Yasal mı?" için hukuk hükmü verme. Bağlamda "KISMİ İADE + GİDEN KARGO" ipucu varsa ona uy; "KARGO ÜCRETSİZ EŞİĞİ → ÜCRETSİZ" ipucunu bu senaryoya uygulama.
-   BÜTÇE / "ELİMDE X TL VAR" (ÇOK ÖNEMLİ): Kullanıcı belirli bir ürün için "elimde 5311 TL var, alabilir miyim?" / "5311'e neden alamam?" derse: X ≥ satış fiyatı → EVET (ödeme sabit fiyattan alınır; fazla para sorun değil). X < fiyat → HAYIR + farkı söyle. 5311 > 5310 iken "Hayır alamazsınız" / "5311 alt teklif" / "sabit fiyat yüzünden 5311 kabul edilmez" DEME. "X TL altı ürün var mı?" katalog filtresidir; "elimde X var bu ürünü alayım mı?" yeterlilik sorusudur — karıştırma.
-10. SAYISAL YANIT HASSASİYETİ (İSTENEN ADET vs GERÇEK SONUÇ — ÇOK ÖNEMLİ): Kullanıcı belirli bir sayıda ürün istediğinde (örn. "en ucuz 3 ürün", "en pahalı 5 çerçeve") ve search_products / bağlam sonucunda istenenden DAHA AZ ürün döndüğünde, bunu ASLA gizleme veya yumuşatma. Metin yanıtında veritabanında/sonuçta TOPLAM kaç ürün bulunduğunu AÇIKÇA belirt. Belirsiz/yanıltıcı ifadeler YASAK:
-   - YANLIŞ: "Evet, en ucuz kaldırım panolarımızdan biri aşağıda..." (sanki daha fazlası varmış gibi)
-   - YANLIŞ: "İşte birkaç örnek..." / "en ucuz 3 ürünümüzden biri..."
-   - DOĞRU: "Bu kategoride yalnızca 1 adet ürün bulunmaktadır. İlgili ürünü aşağıda inceleyebilirsiniz:"
-   - DOĞRU: "İstediğiniz 3 ürün yerine bu kritere uyan yalnızca 2 ürün bulundu; ikisini de aşağıda görebilirsiniz:"
-   İstenen adet kadar veya daha fazla sonuç varsa normal kısa özet yeterlidir; uydurma ürün ekleyerek sayıyı tamamlamaya ÇALIŞMA.
-11. TEKNİK SORGULAR VE POLİTİKALAR (İADE/KARGO/ÖDEME/FATURA/HUKUK): Kullanıcı kargo, iade, ödeme, dava/tahkim, yurt dışı/AB cayma, çocuk verisi/ebeveyn silme, KDV/fatura soruyorsa KAPSAM İÇİ — reddetme. Bağlama uy: kargo 750 (sipariş anı); kısmi iadede giden kargo kesintisi belgede yok → uydurma; TR iade 14 gün (önce talep+etiket; adres Sakarya/Arifiye — Kağıthane iade adresi değil; talepsiz gönderim kabul edilmeyebilir); para iadesi onay sonrası 10 iş günü. Ödeme kart/iyzico/havale; kapıda nakit yok; KDV oranı / kısmi iade yeni fatura belgede yok → uydurma, iletişime yönlendir. hasar→iletişim; yanlış adres→müşteri sorumluluğu. YURT DIŞI: gönderim yok. AB cayma yalnızca ORES AB'ye gönderirse. ÇOCUK VERİSİ: §6.8 + iletişim. DAVA/TAHKİM: ölçülü dil; "yasal mı" için mahkeme hükmü yok. Uydurma yok; Kural 12.
-12. GERÇEK İLETİŞİM BİLGİLERİNİ PAYLAŞ (ÇOK ÖNEMLİ): Kullanıcı iletişim, telefon açılmıyor, acil sipariş/iptal/değişiklik istediğinde ASLA genel "müşteri hizmetlerine ulaşın" deme. Bağlamdaki gerçek e-posta + telefon + çalışma saatlerini (08:00–18:00) DOĞRUDAN paylaş. Mesai dışıysa bunu açıkla. Sipariş değişikliği/iptali için varsayılan "iade+yeni sipariş" UYDURMA (ürün teslim alınmadıysa); e-posta ile sipariş no ile yazmasını söyle.
-${
-  toolActive
-    ? `13. ARAÇ (search_products) SONUCU ÖNCEDEN FİLTRELENDİ (ÇOK ÖNEMLİ): Aşağıdaki BAĞLAM BİLGİLERİ, search_products fonksiyonunun sonucudur ve veritabanı tarafından senin istediğin kritere göre ZATEN TAM ve DOĞRU şekilde filtrelenmiştir. Bu sonuçları kendi başına tekrar filtreleme veya uydurma ürün eklemeye ÇALIŞMA; sonuçtaki gerçek ürün sayısını Kural 10'a göre dürüstçe belirt, hepsi kartlarda gösterilecek.`
-    : ''
-}
-${
-  isAmbiguousGenericQuery
-    ? `14. GENEL/BELİRSİZ SORU KURALI: Kullanıcının mesajı belirli bir kategori veya ürün belirtmiyor (örn. "sizde neler var", "ne satıyorsunuz") ve bağlamda ya hiçbir gerçek ürün dokümanı yok ya da birden fazla FARKLI kategoriden ürün var. Bu durumda ASLA kendi kendine örnek/varsayımsal bir ürün listesi icat etme veya bağlamdaki ilgisiz (örn. politika) içerikten ürün üretme. Sadece aşağıdaki "KATALOĞUMUZDAKI GERÇEK KATEGORİLER" listesindeki kategori adlarını kullanıcıya söyle ve hangi kategoriyle ilgilendiğini sor.`
-    : ''
-}
+const PROMPT_PRODUCT_RULES = `ÜRÜN KURALLARI:
+ARAÇ: Fiyat filtresi, sıralama (en ucuz/en ağır), stok, indirim, kategori → search_products. Filtrelemeyi kendin yapma. Tek ürün → limit=1. "Stokta olmayan en ucuz…" → out_of_stock_only=true, sort_by=price_asc.
+SIRALAMA: "En ağır ve en ucuz mu?" → önce ağırlık (kg); "en ucuz mu?" Evet/Hayır'dır, sıralamayı fiyata çevirme. AĞIRLIK ≠ FİYAT.
+ÇİFT İSTEK: "X var mı? Yoksa en ucuz 3 çerçeve" → önce X yoksa söyle; sonra search_products.
+0. ÜRÜN KARTLARI HAZIR ise metinde tablo/liste/ürün detayı YASAK. Sadece: kısa özet + [[URUN_KARTLARI]] + proaktif satış kapanışı. "Başka konuda yardımcı olayım mı?" deme.
+   İSTİSNA: fiyat/stok sorulduysa veya "FİYAT/STOK ÖZETİ" varsa kısa özet satırında yaz.
+1. Kartlı kapanış satış odaklı olsun (model/boyut/detay sor).
+2. Stok 0'ı gizleme; sipariş onaylama; "şu an stokta yok" de.
+4. Özel ölçü/baskı: reddetme; "yapıyoruz/yapmıyoruz/mümkün" uydurma; iletişim ver.
+5. Alternatif kategori önerirken SADECE listedeki gerçek kategoriler.
+6. Sipariş: kullanıcının adres/telefon/kartını İSTEME. Kart varsa [İncele]; yoksa bağlamdaki satın alma linki. Adet > stok ise onaylama.
+7. Link: sadece bağlamdaki URL; markdown [Metin](URL).
+8. Sonuçtaki TÜM ürünler kartta; "birkaç örnek" deme.
+9-BÜTÇE: "elimde X TL var bu ürünü alayım mı?" → X≥fiyat EVET (fazla para sorun değil); X<fiyat HAYIR+fark. Katalog "X altı var mı?" ile karıştırma.
+10. İstenen adetten az sonuç varsa gerçek sayıyı açıkça yaz; uydurma ürün ekleme.`;
 
-KATALOĞUMUZDAKI GERÇEK KATEGORİLER:
-${knownCategoriesText}
-${hasProductCards ? `\nÜRÜN KARTLARI HAZIR: Bu sorguya uyan ürünler bulundu; arayüzde otomatik olarak yatay kart (carousel) halinde gösterilecek. Kural 0'a KESİNLİKLE uy: metinde ürün detayı / bullet listesi / tablo YAZMA; sadece kısa kibar özet + [[URUN_KARTLARI]] + proaktif satış odaklı kapanış sorusu. "Başka bir konuda yardımcı olmamı ister misiniz?" deme — yerine listedeki modele / boyuta / detaya yönlendiren interaktif bir soru sor. Kullanıcı belirli bir adet istediyse ve sonuç daha azsa Kural 10'a göre gerçek sayıyı açıkça yaz.\n` : ''}
-${pinnedFollowUpProduct ? `\nTAKİP ÜRÜNÜ KİLİTLENDİ: Kullanıcı bu ürün hakkında detay istiyor. BAĞLAM bu ürünün TAM kaydıdır. Kural 3 sırasına KESİN uy: (1) kısa giriş (2) Ürün Özellikleri maddeleri (3) Fiyat/Stok (4) uzun açıklama EN SONA (5) link + kapanış. Uzun açıklamayı başa koyma. "Sadece listeye erişebiliyorum" deme. [[URUN_KARTLARI]] kullanma.\n` : ''}
-BAĞLAM BİLGİLERİ:
-${contextWithHints}`;
+const PROMPT_DETAIL_RULES = `ÜRÜN DETAY KURALLARI:
+Takip/onay ("evet", "detay", "bu ürün hakkında bilgi") → BAĞLAM'daki kilitli ürünün TAM içeriğiyle cevap ver. "Sadece listeye erişebiliyorum" deme. [[URUN_KARTLARI]] kullanma (kart istenmedikçe).
+SIRALAMA (ZORUNLU):
+(1) Kısa giriş (2) **Ürün Özellikleri** madde madde (3) **Fiyat/Stok** (4) uzun açıklama EN SONA (5) link + kapanış.
+YANLIŞ: uzun açıklamayı başa koyma.
+Link: sadece bağlamdaki URL. Siparişte kullanıcının kişisel bilgisini isteme.
+BÜTÇE: "elimde X TL" → X≥fiyat EVET; X<fiyat HAYIR+fark.`;
+
+const PROMPT_TOOL_ACTIVE =
+  'ARAÇ SONUCU ÖNCEDEN FİLTRELENDİ: BAĞLAM search_products çıktısıdır; tekrar filtreleme veya uydurma ürün ekleme. Gerçek sayıyı dürüstçe belirt.';
+
+const PROMPT_AMBIGUOUS =
+  'GENEL/BELİRSİZ SORU: Belirli kategori/ürün yoksa ürün listesi UYDURMA. Sadece gerçek kategori listesini sor ve hangi kategoriyle ilgilendiğini sor.';
+
+function buildSystemPrompt(params: BuildSystemPromptParams): string {
+  const {
+    knownCategoriesText,
+    contextText,
+    hasProductCards,
+    isAmbiguousGenericQuery,
+    toolActive,
+    pinnedFollowUpProduct = false,
+    userMessage = '',
+    extraContextPrefix = '',
+  } = params;
+
+  const lane = resolvePromptLane(params);
+  // Ürün yolunda da mesaj kargo/iade içeriyorsa ilgili paketleri ekle (karışık soru).
+  // Saf ürün sorusunda detect boş döner → politika few-shot'ları yüklenmez.
+  let policyPacks = detectPolicyPacks(userMessage);
+  if (lane === 'product' || lane === 'detail') {
+    policyPacks = policyPacks.filter((pack) => pack !== 'genel');
+  }
+
+  const sections: string[] = [PROMPT_BASE];
+
+  if (lane === 'product' || lane === 'general') {
+    sections.push(PROMPT_PRODUCT_RULES);
+  }
+  if (lane === 'detail') {
+    sections.push(PROMPT_DETAIL_RULES);
+  }
+  if (lane === 'policy' || policyPacks.length > 0) {
+    const packsToUse =
+      policyPacks.length > 0
+        ? policyPacks
+        : (['genel', 'iade', 'kargo', 'odeme', 'destek'] as PolicyPack[]);
+    sections.push(...packsToUse.map(policyPackText));
+  }
+  if (lane === 'general') {
+    // Fallback ilk çağrı: kısa araç notu yeter; ağır politika few-shot'ları
+    // yalnızca detectPolicyPacks tetiklenirse yukarıda eklendi.
+    sections.push(
+      'ARAÇ: Filtre/sıralama/stok/indirim sorularında search_products çağır. Saf politika sorusunda araç gerekmeyebilir.'
+    );
+  }
+
+  if (toolActive) sections.push(PROMPT_TOOL_ACTIVE);
+  if (isAmbiguousGenericQuery) sections.push(PROMPT_AMBIGUOUS);
+
+  sections.push(`KATALOĞUMUZDAKI GERÇEK KATEGORİLER:\n${knownCategoriesText}`);
+
+  if (hasProductCards) {
+    sections.push(
+      'ÜRÜN KARTLARI HAZIR: kısa özet + [[URUN_KARTLARI]] + satış odaklı kapanış. Metinde ürün detayı/tablo/liste YASAK. İstenen adetten az sonuç varsa gerçek sayıyı yaz.'
+    );
+  }
+  if (pinnedFollowUpProduct) {
+    sections.push(
+      'TAKİP ÜRÜNÜ KİLİTLENDİ: BAĞLAM bu ürünün tam kaydıdır. Detay sırasına uy; uzun açıklamayı başa koyma.'
+    );
+  }
+
+  const hinted = withPolicyHints(userMessage, contextText);
+  const contextWithHints = extraContextPrefix
+    ? `${extraContextPrefix}\n\n${hinted}`
+    : hinted;
+  sections.push(`BAĞLAM BİLGİLERİ:\n${contextWithHints}`);
+
+  const prompt = sections.join('\n\n');
+  if (process.env.CHAT_DEBUG_PROMPT === '1') {
+    console.log(
+      `[prompt] lane=${lane} packs=${policyPacks.join(',') || '-'} chars=${prompt.length} ~token=${Math.round(prompt.length / 3.2)}`
+    );
+  }
+  return prompt;
 }
 
 export async function POST(req: NextRequest) {
@@ -2684,53 +2827,14 @@ export async function POST(req: NextRequest) {
       knownCategories
     );
 
-    // 1. Kullanıcının sorduğu soru için baseline (temel) bağlamı vektör
-    // aramasıyla oluştur. Bu bağlam iki amaca hizmet eder: (a) politika/
-    // iletişim/genel sorularda doğrudan cevap için yeterli olabilir, (b) ilk
-    // model çağrısında modele "elimde zaten şu bilgi var, gerekirse
-    // search_products aracını da çağırabilirim" demesi için zemin sağlar.
-    //
-    // Takip soruları ("bu ürün 500 TL'nin altında mı?" gibi) tek başına,
-    // önceki bağlam olmadan embed edilirse ilgisiz dokümanlarla eşleşebilir;
-    // bu yüzden son asistan yanıtını da embedding girdisine ekliyoruz.
-    const lastAssistantMessage = cleanHistory
-      .filter((turn) => turn.role === 'assistant')
-      .slice(-1)[0]?.content;
-    const embeddingInput = lastAssistantMessage
-      ? `${lastAssistantMessage.slice(0, 2000)}\n\n${message}`
-      : message;
-
-    const embeddingResponse = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: embeddingInput,
-    });
-    const queryEmbedding = embeddingResponse.data[0].embedding;
-
-    // Politika dokümanları (iade/kargo/garanti vb.) uzun başlıklı markdown
-    // metinleri olduğundan embedding benzerlikleri ürün dokümanlarına göre
-    // daha düşük çıkabiliyor; bu yüzden politika niyeti tespit edilen
-    // sorularda benzerlik eşiğini gevşetiyoruz.
-    const isPolicyQuestion = looksLikePolicyQuestion(message);
-    const { data: matchedDocs, error: matchError } = await supabase.rpc('match_documents', {
-      query_embedding: queryEmbedding,
-      match_threshold: isPolicyQuestion ? 0.15 : 0.3,
-      match_count: 8,
-    });
-
-    if (matchError) {
-      console.error('Supabase Vektör Arama Hatası:', matchError);
-      return NextResponse.json(
-        { error: 'Veritabanı araması sırasında hata oluştu.' },
-        { status: 500 }
-      );
-    }
-
-    let documents: MatchedDocument[] = (matchedDocs ?? []) as MatchedDocument[];
+    // Baseline vektör araması artık her istekte çalışmaz: pin / filtre /
+    // kategori gibi deterministik ürün yolları SQL sonucunu kullanır.
+    // Embedding + match_documents yalnızca aşağıda fallback (politika /
+    // belirsiz / tool) yoluna düşüldüğünde çağrılır.
+    let documents: MatchedDocument[] = [];
 
     // Takip sorusuysa ("bu ürünün ağırlığı", "indirimli fiyatı nedir" vb.)
-    // sohbette en son adı geçen ürünü bulup bağlama KİLİTLE. Böylece vektör
-    // araması yanlış bir ürüne sapsa bile model doğru ürünün ağırlık/fiyat/
-    // stok bilgisini görür.
+    // sohbette en son adı geçen ürünü bulup bağlama KİLİTLE.
     let pinnedFollowUpProduct = false;
     // "evet ," + önceki "başka kategori ister misiniz?" → pin DEĞİL, alternatif arama
     const acceptAlternateCategory = shouldAcceptAlternateCategory(
@@ -2833,8 +2937,9 @@ export async function POST(req: NextRequest) {
         if (pinError) {
           console.error('Takip ürünü kilitlenirken hata:', pinError);
         } else if (pinnedRows && pinnedRows.length > 0) {
-          const nonProductDocs = documents.filter((doc) => doc.metadata?.type !== 'product');
-          documents = [...(pinnedRows as MatchedDocument[]), ...nonProductDocs];
+          // Yalnızca kilitlenen ürün: vektörden gelen alakasız politika
+          // chunk'larını detay bağlamına karıştırma (~3–4k token tasarruf).
+          documents = pinnedRows as MatchedDocument[];
           pinnedFollowUpProduct = true;
         }
       }
@@ -2905,8 +3010,6 @@ export async function POST(req: NextRequest) {
 
       return { isAmbiguousGenericQuery, hasProductCards, contextText };
     };
-
-    const baseline = buildDerivedPromptFields(documents, false);
 
     const tools = [buildSearchProductsTool(knownCategoriesText)];
 
@@ -3904,13 +4007,28 @@ export async function POST(req: NextRequest) {
         rawReply = `${rawReply}\n\n${PRODUCT_CARDS_PLACEHOLDER}`;
       }
     } else {
-      // 2. İlk model çağrısı: model, elindeki baseline bağlamla doğrudan
-      // cevap verebilir YA DA kesin filtreleme/sıralama gerektiren bir istek
-      // için search_products aracını çağırabilir (tool_choice: 'auto').
+      // 2. Fallback: politika / belirsiz / tool yolu. Baseline vektör
+      // araması yalnızca burada çalışır — pin/filtre yollarında atlanır.
+      const {
+        documents: baselineDocs,
+        error: matchError,
+      } = await fetchBaselineDocuments(supabase, message, cleanHistory);
+
+      if (matchError) {
+        console.error('Supabase Vektör Arama Hatası:', matchError);
+        return NextResponse.json(
+          { error: 'Veritabanı araması sırasında hata oluştu.' },
+          { status: 500 }
+        );
+      }
+
+      documents = baselineDocs;
+      const baseline = buildDerivedPromptFields(documents, false);
+
+      // İlk model çağrısı: baseline ile doğrudan cevap veya search_products.
       // ÖNEMLİ: baseline (toolActive:false) yanıtında hasProductCards HER
       // ZAMAN false'tur; kartlar sadece gerçek bir tool çağrısı sonucunda
-      // (aşağıdaki if bloğunda) gösterilir (bkz. Tool Output/Message State
-      // bug fix'i).
+      // (aşağıdaki if bloğunda) gösterilir.
       const firstCompletion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         messages: [
